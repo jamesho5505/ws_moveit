@@ -1,0 +1,25 @@
+moveit_setup_assistant_config:
+  urdf:
+    package: tm_description
+    relative_path: xacro/tm5-900.urdf.xacro
+  srdf:
+    relative_path: config/tm5-900.srdf
+  package_settings:
+    author_name: kuan wei, ho
+    author_email: jamesho5055@g.ncu.edu.tw
+    generated_timestamp: 1750409806
+  control_xacro:
+    command:
+      - position
+    state:
+      - position
+      - velocity
+  modified_urdf:
+    xacros:
+      - control_xacro
+  control_xacro:
+    command:
+      - position
+    state:
+      - position
+      - velocity
