@@ -27,11 +27,11 @@ public:
 
   void doTask();
 
-  static void setupPlanningScene();
+  void setupPlanningScene();
 
 private:
   // Compose an MTC task from a series of stages.
-  mtc::Task createTask() const;
+  mtc::Task createTask();
   mtc::Task task_;
   rclcpp::Node::SharedPtr node_;
 };
@@ -97,7 +97,7 @@ void MTCTaskNode::doTask()
   return;
 }
 
-mtc::Task MTCTaskNode::createTask() const
+mtc::Task MTCTaskNode::createTask()
 {
   mtc::Task task;
   task.stages()->setName("simple test task");
@@ -370,7 +370,7 @@ int main(int argc, char** argv)
     executor.remove_node(mtc_task_node->getNodeBaseInterface());
   });
 
-  MTCTaskNode::setupPlanningScene();
+  mtc_task_node->setupPlanningScene();
   mtc_task_node->doTask();
 
   spin_thread->join();

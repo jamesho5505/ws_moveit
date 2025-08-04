@@ -17,16 +17,41 @@ class FT6Publisher(Node):
         
         self.ser = serial.Serial('/dev/ttyUSB0', 921600, timeout=1.0)
         self.ser.reset_input_buffer()
+        self.zero_adjust()
+        time.sleep(1.0)  # 等感測器穩定（關鍵）
+        self.get_logger().info("Re-entering continuous mode after zero adjust")
+        self.ser.write(b'E')     # 確保離開異常狀態
+        time.sleep(0.1)
         self.ser.write(b'S')  # 進入連續模式
-
+        self.ser.reset_input_buffer()
+        self.get_logger().info("serial_loop started")
         self.buf = bytearray()
         self.thread = Thread(target=self.serial_loop, daemon=True)
         self.thread.start()
 
+    def zero_adjust(self):
+        self.get_logger().info("Exit continuous mode for zero adjust")
+        self.ser.write(b'E')
+        time.sleep(0.1)
+
+        self.get_logger().info("Setting sample time for zero adjust")
+        self.ser.write(b'A\x05')  # 0.5 秒取樣
+        time.sleep(0.6)           # 等待取樣完成
+
+        self.get_logger().info("Sending zero adjust command")
+        self.ser.write(b'O')
+        time.sleep(0.5)           # 感測器處理歸零
+        self.ser.write(b'R')  # 發一次性請求
+        time.sleep(0.05)
+        reply = self.ser.read(27)
+        self.get_logger().info(f"One-shot read: {reply}")
+
+        self.get_logger().info("Zero adjust complete")
+
+
     def valid(self, pkt: bytes) -> bool:
         return (
             len(pkt) == 27 and
-            pkt[0:25][-2:] != b'\r\n' and
             pkt[25:]   == b'\r\n' and
             pkt[0]     in b'0123456789' and
             all(c in HEXSET for c in pkt[:25])
@@ -64,7 +89,7 @@ class FT6Publisher(Node):
                     msg.header.frame_id = "ft_sensor"
                     msg.wrench.force = Vector3(x=fx, y=fy, z=fz)
                     msg.wrench.torque = Vector3(x=mx, y=my, z=mz)
-
+                    
                     self.publisher.publish(msg)
 
             except Exception as e:
@@ -83,6 +108,10 @@ def main(args=None):
     node = FT6Publisher()
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        node.get_logger().info("Shutting down FT6Publisher...")
+        pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            node.destroy_node()
+            rclpy.shutdown()
