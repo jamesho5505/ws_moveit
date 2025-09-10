@@ -14,6 +14,12 @@ controller_manager:
     joint_state_broadcaster:
       type: joint_state_broadcaster/JointStateBroadcaster
 
+    force_sensor_broadcaster:
+      type: force_torque_sensor_broadcaster/ForceTorqueSensorBroadcaster
+
+    admittance_controller:
+      type: admittance_controller/AdmittanceController
+
 tmr_arm_controller:
   ros__parameters:
     joints:
@@ -29,6 +35,7 @@ tmr_arm_controller:
       - position
       - velocity
     allow_nonzero_velocity_at_trajectory_end: true
+
 robotiq_gripper_controller:
   ros__parameters:
     joint: robotiq_85_left_knuckle_joint
@@ -40,3 +47,72 @@ robotiq_gripper_controller:
       - position
       - velocity
     allow_nonzero_velocity_at_trajectory_end: true
+
+admittance_controller:
+  ros__parameters:
+    joints:
+      - joint_1
+      - joint_2
+      - joint_3
+      - joint_4
+      - joint_5
+      - joint_6
+    command_interfaces:
+      - position
+      - velocity
+    state_interfaces:
+      - position
+    # --- 力/力矩感測器設定 ---
+    ft_sensor_name: ft_sensor
+    use_joint_commands_as_input: true
+    joint_limiter_type: "joint_limiter/SimpleJointLimiter"
+
+    state_publisher_rate: 100  # Hz
+    action_monitor_rate: 20  # Hz
+   
+    allow_partial_joints_goal: false
+    open_loop_control: false
+    allow_integration_in_goal_trajectories: false
+    constraints:
+      stopped_velocity_tolerance: 0.05
+      goal_time: 0.0
+    IK:
+      base: "base"
+      tip: "robotiq_tcp"
+      group_name: "tmr_arm"
+
+    endeffector_frame: "robotiq_tcp"
+    control_frame: "base"
+    fixed_world_frame: "world"
+    sensor_frame: "ft_sensor"
+
+    admittance:
+      selected_axes:
+        x: true
+        y: true
+        z: true
+        rx: true
+        ry: true
+        rz: true
+
+    mass:
+      x: 0.5
+      y: 0.5
+      z: 0.5
+      rx: 0.1
+      ry: 0.1
+      rz: 0.1 # kg, kg*m^2
+    damping:
+      x: 0.1
+      y: 0.1 
+      z: 0.1
+      rx: 0.1
+      ry: 0.1
+      rz: 0.1 # Nm
+    stiffness:
+      x: 100.0
+      y: 100.0
+      z: 100.0
+      rx: 10.0
+      ry: 10.0
+      rz: 10.0 # N/m, Nm/rad
