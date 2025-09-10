@@ -25,8 +25,8 @@
       name="camera">
       <origin xyz="0.0 -0.0783 0.0157" rpy="0 ${-pi/2} ${-pi/2}"/> 
   </xacro:sensor_d435>
-  
 
+  <!-- === 3. 掛 Robotiq 2F-85 === -->
   <xacro:robotiq_gripper
       parent="flange"
       prefix=""
