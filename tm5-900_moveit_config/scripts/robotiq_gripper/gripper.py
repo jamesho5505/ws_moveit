@@ -2,7 +2,7 @@ import serial
 import time
 import binascii
 
-ser = serial.Serial(port='COM3',baudrate=115200,timeout=1,parity=serial.PARITY_NONE,stopbits=serial.STOPBITS_ONE,bytesize=serial.EIGHTBITS)
+ser = serial.Serial(port='/dev/ttyUSB0',baudrate=115200,timeout=1,parity=serial.PARITY_NONE,stopbits=serial.STOPBITS_ONE,bytesize=serial.EIGHTBITS)
 counter = 0
 while counter < 1:
     counter = counter + 1

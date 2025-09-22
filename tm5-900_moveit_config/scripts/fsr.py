@@ -2,6 +2,7 @@
 import re, math, argparse, serial, rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray
+import time
 
 PAIR_RE = re.compile(r'([A-Za-z0-9_]+)(?:\([^)]+\))?=([+-]?(?:\d+(?:\.\d+)?))')
 
@@ -13,8 +14,9 @@ class FSRSerial(Node):
         self.timer = self.create_timer(0.005, self.step)  # 200 Hz 嘗試讀
 
     def step(self):
+        t0 = time.perf_counter_ns()
         line = self.ser.readline().decode(errors='ignore').strip()
-        
+        t1 = time.perf_counter_ns()
         if not line:
             return
         # pairs = dict(PAIR_RE.findall(line))
@@ -40,12 +42,20 @@ class FSRSerial(Node):
         f1 = max(0.0, f1)
         f2 = max(0.0, f2)
         msg.data = [f1, f2, 0.5*(f1+f2)]
+        t2 = time.perf_counter_ns()
         self.pub.publish(msg)
+        t3 = time.perf_counter_ns()
+
+        read_us = (t1 - t0) / 1000
+        pub_us = (t3 - t2) / 1000
+        total_us = (t3 - t0) / 1000
+        if int(time.time()*2) % 40 == 0:
+            self.get_logger().info(f"read_us:{read_us:.2f} pub_us:{pub_us:.2f} total_us:{total_us:.2f}")
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--port', default='/dev/ttyACM0')
-    ap.add_argument('--baud', type=int, default=115200)
+    ap.add_argument('--baud', type=int, default=460800)
     ap.add_argument('--topic', default='arduino/force')
     args = ap.parse_args()
 
