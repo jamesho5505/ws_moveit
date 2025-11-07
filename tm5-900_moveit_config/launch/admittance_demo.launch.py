@@ -137,6 +137,31 @@ def generate_launch_description():
         arguments=["robotiq_gripper_controller", "-c", "/controller_manager"],
     )
 
+    admittance_controller_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=["admittance_controller", "-c", "/controller_manager"],
+    )
+
+    force_sensor_broadcaster_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=[
+            "force_sensor_broadcaster",
+            "--controller-manager",
+            "/controller_manager",
+        ],
+    )
+    # FT Sensor driver node
+    ft_sensor_node = Node(
+        package='ft_sensor_driver',
+        # 請確保您 setup.py 中的可執行檔名稱與 'ft_publisher' 相符
+        executable='ft_publisher',
+        name='ft_sensor_publisher',
+        output='screen',
+        # 如果您的節點需要參數，可以在這裡加入
+    )
+
     return LaunchDescription(
         [
             rviz_config_arg,
@@ -149,5 +174,8 @@ def generate_launch_description():
             joint_state_broadcaster_spawner,
             panda_arm_controller_spawner,
             panda_hand_controller_spawner,
+            admittance_controller_spawner,
+            force_sensor_broadcaster_spawner,
+            ft_sensor_node,
         ]
     )
