@@ -255,9 +255,9 @@ class RobotiqGripperNode(Node):
         elif self.mode == Mode.HOLD:
             print("HOLD", self.cmd_mm)
             pass
-            # if self.dfdt < -1000.0:
+            # if self.dfdt < -500.0:
             #     # 突然失力，可能掉了，回到接近模式
-            #     self.cmd_mm = CLAMP(self.cmd_mm - 0.5, self.close_mm, self.open_mm)
+            #     # self.cmd_mm = CLAMP(self.cmd_mm - 0.5, self.close_mm, self.open_mm)
             #     self.mode = Mode.APPROACH
             # else:
             #     pass # 在 HOLD 模式下，保持當前位置，不更新 cmd_mm

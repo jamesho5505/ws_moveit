@@ -1,204 +1,146 @@
 #!/usr/bin/env python3
-import rclpy, sys, signal, csv
+# record_force_pair.py
+import rclpy, threading, time, csv, serial
 from rclpy.node import Node
-from std_msgs.msg import Float32MultiArray, Float32
-from sensor_msgs.msg import JointState
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-from collections import deque
+from std_msgs.msg import Float32MultiArray
 
-# --- 圖表設定 ---
-HISTORY_LEN = 500  # 圖表上保留的歷史數據點數量 (僅用於顯示)
-YLIM_FORCE = (0, 3000)
-YLIM_JOINT = (-0.1, 0.9)
+# ---- load cell 解析（仿你 loadcell.py）----
+def parse_frame(b: bytes):
+    # 期望: 13 bytes, 0x02 ... 0x0D
+    if len(b) != 13 or b[0] != 0x02 or b[-1] != 0x0D:
+        return None
+    sign_chr   = chr(b[1])
+    num_str    = b[2:9].decode('ascii')        # 含空白與小數點
+    unit_str   = b[9:11].decode('ascii').strip()
+    status_chr = chr(b[11])                    # ' ' 或 'G'
+    val = float(num_str.replace(' ', '0'))
+    if sign_chr == '-':
+        val = -val
+    u = unit_str.lower()
+    if u == 'g':   grams = val
+    elif u == 'kg': grams = val*1000.0
+    elif u == 'lb': grams = val*453.59237
+    elif u == 'nt': grams = val*1000.0/9.80665
+    elif u == 'kn': grams = val*1_000_000.0/9.80665
+    else:          grams = val
+    return -grams, unit_str, status_chr  # 面板受力方向相反，取負
 
-# --- 夾爪關節名稱 ---
-GRIPPER_JOINT_NAME = 'robotiq_85_left_knuckle_joint'
+class PairLogger(Node):
+    def __init__(self,
+                 topic='/esp32/force',
+                 force_idx=2,
+                 port='/dev/ttyUSB1',
+                 baud=9600,
+                 out_csv='force_pair_log.csv'):
+        super().__init__('pair_logger')
+        self.force_idx = force_idx
+        self.F_fsr = float('nan')
+        self.F_lc  = float('nan')
+        self.last_unit = ''
+        self.last_status = ' '
+        self.t0 = time.time()
 
-class FSRPlotter(Node):
-    def __init__(self):
-        super().__init__('fsr_plotter_node')
-        self.force_subscription = self.create_subscription(
-            Float32MultiArray,
-            '/arduino/force',
-            self.force_callback,
-            10)
-        self.joint_subscription = self.create_subscription(
-            JointState,
-            '/joint_states',
-            self.joint_callback,
-            10)
-        self.ftarget_subscription = self.create_subscription(
-            Float32,
-            '/gripper/target_force',
-            self.ftarget_callback,
-            10)
-        self.gripper_joint_index = -1
-        self.output_filename = "gripper_data.csv"
-        
-        # 使用 List 來儲存所有數據
-        self.history = {
-            'Force1': [],
-            'Force2': [],
-            'Average': [],
-            'F_target': [],
-            'GripperPos': []
-        }
+        # ROS 訂閱 ESP32 合力
+        self.create_subscription(Float32MultiArray, topic, self.cb_force, 10)
 
-        self.force_labels = ['Force1', 'Force2', 'Average', 'F_target']
-        self.force_colors = ['tab:blue', 'tab:green', 'tab:red', 'black']
-        self.lines = []
+        # 開 serial（JS-300 常見 7E2）
+        self.ser = serial.Serial(
+            port, baud,
+            bytesize=serial.SEVENBITS,
+            parity=serial.PARITY_ODD,
+            stopbits=serial.STOPBITS_TWO,
+            timeout=0.02
+        )
+        self.buf = bytearray()
 
-        # 設定 Matplotlib 圖表
-        self.fig, self.ax = plt.subplots(figsize=(10, 6))
-        self.fig.canvas.manager.set_window_title("FSR Live Force Viewer")
-        
-        # 設定左 Y 軸 (力量)
-        self.ax.set_title("Live Force and Gripper Position")
-        self.ax.set_xlabel("Time (samples)")
-        self.ax.set_ylabel("Force (grams)", color='tab:red')
-        self.ax.set_ylim(*YLIM_FORCE)
-        self.ax.tick_params(axis='y', labelcolor='tab:red')
-        self.ax.grid(True)
+        # 寫 CSV
+        self.fh = open(out_csv, 'w', newline='')
+        self.w = csv.writer(self.fh)
+        self.w.writerow(['t_s','fsr_total_g','loadcell_g','loadcell_unit','loadcell_status'])
 
-        for label, color in zip(self.force_labels, self.force_colors):
-            linestyle = '--' if label == 'F_target' else '-'
-            linewidth = 2.0 if label == 'F_target' else 1.5
-            line, = self.ax.plot([], [], color=color, label=label, 
-                                 linestyle=linestyle, linewidth=linewidth)
-            self.lines.append(line)
+        # 定時器：讀 load cell 並落盤
+        self.timer = self.create_timer(0.02, self.step)  # 50 Hz 記錄
 
-        # 設定右 Y 軸 (夾爪位置)
-        self.ax2 = self.ax.twinx()
-        self.ax2.set_ylabel('Gripper Position (rad)', color='tab:purple')
-        self.ax2.set_ylim(*YLIM_JOINT)
-        self.ax2.tick_params(axis='y', labelcolor='tab:purple')
-        line, = self.ax2.plot([], [], color='tab:purple', linestyle='--', label='Gripper Position')
-        self.lines.append(line)
+        # 背景執行緒：快取 serial 原始資料
+        self.stop_evt = threading.Event()
+        self.th = threading.Thread(target=self._serial_pump, daemon=True)
+        self.th.start()
 
-        # 整合圖例
-        self.fig.legend(loc="upper right", bbox_to_anchor=(1,1), bbox_transform=self.ax.transAxes)
-        self.fig.tight_layout()
+        self.get_logger().info('pair logger started')
 
-    def force_callback(self, msg: Float32MultiArray):
-        if len(msg.data) >= 3:
-            self.history['Force1'].append(msg.data[0])
-            self.history['Force2'].append(msg.data[1])
-            self.history['Average'].append(msg.data[2])
-            
-            # 確保所有列表長度同步
-            target_len = len(self.history['Average'])
-            while len(self.history['F_target']) < target_len:
-                self.history['F_target'].append(self.history['F_target'][-1] if self.history['F_target'] else 0.0)
-            while len(self.history['GripperPos']) < target_len:
-                self.history['GripperPos'].append(self.history['GripperPos'][-1] if self.history['GripperPos'] else 0.0)
+    def cb_force(self, msg: Float32MultiArray):
+        if not msg.data:
+            return
+        i = 2
+        if -len(msg.data) <= i < len(msg.data):
+            self.F_fsr = float(msg.data[i])
 
-    def ftarget_callback(self, msg: Float32):
-        self.history['F_target'].append(msg.data)
-        
-        # 確保所有列表長度同步
-        target_len = len(self.history['F_target'])
-        while len(self.history['Average']) < target_len:
-            self.history['Average'].append(self.history['Average'][-1] if self.history['Average'] else 0.0)
-        while len(self.history['Force1']) < target_len:
-            self.history['Force1'].append(self.history['Force1'][-1] if self.history['Force1'] else 0.0)
-        while len(self.history['Force2']) < target_len:
-            self.history['Force2'].append(self.history['Force2'][-1] if self.history['Force2'] else 0.0)
-        while len(self.history['GripperPos']) < target_len:
-            self.history['GripperPos'].append(self.history['GripperPos'][-1] if self.history['GripperPos'] else 0.0)
-
-    def joint_callback(self, msg: JointState):
-        if self.gripper_joint_index == -1:
-            try:
-                self.gripper_joint_index = msg.name.index(GRIPPER_JOINT_NAME)
-                self.get_logger().info(f"成功找到夾爪關節 '{GRIPPER_JOINT_NAME}' 於索引 {self.gripper_joint_index}")
-            except ValueError:
-                self.get_logger().error(f"在 /joint_states 中找不到關節 '{GRIPPER_JOINT_NAME}'！請檢查 URDF 和關節名稱。")
-                self.gripper_joint_index = -2
-        
-        if self.gripper_joint_index >= 0:
-            self.history['GripperPos'].append(msg.position[self.gripper_joint_index])
-            
-            # 確保所有列表長度同步
-            target_len = len(self.history['GripperPos'])
-            while len(self.history['Average']) < target_len:
-                self.history['Average'].append(self.history['Average'][-1] if self.history['Average'] else 0.0)
-            while len(self.history['Force1']) < target_len:
-                self.history['Force1'].append(self.history['Force1'][-1] if self.history['Force1'] else 0.0)
-            while len(self.history['Force2']) < target_len:
-                self.history['Force2'].append(self.history['Force2'][-1] if self.history['Force2'] else 0.0)
-            while len(self.history['F_target']) < target_len:
-                self.history['F_target'].append(self.history['F_target'][-1] if self.history['F_target'] else 0.0)
-
-    def update_plot(self, frame):
-        rclpy.spin_once(self, timeout_sec=0)
-        
-        num_points = len(self.history['Average'])
-        if num_points > 0:
-            x_data = range(num_points)
-            
-            # 動態調整 x 軸顯示範圍
-            if num_points > HISTORY_LEN:
-                self.ax.set_xlim(num_points - HISTORY_LEN, num_points)
+    def _serial_pump(self):
+        # 收集完整幀後即時更新 F_lc
+        while not self.stop_evt.is_set():
+            b = self.ser.read(1)
+            if not b:
+                continue
+            c = b[0]
+            if c == 0x02:               # STX
+                self.buf = bytearray([c])
             else:
-                self.ax.set_xlim(0, HISTORY_LEN)
+                self.buf.append(c)
+                if c == 0x0D:           # CR
+                    res = parse_frame(bytes(self.buf))
+                    if res:
+                        grams, unit, st = res
+                        self.F_lc = grams
+                        self.last_unit = unit
+                        self.last_status = st
+                    self.buf.clear()
 
-            all_labels = self.force_labels + ['GripperPos']
-            for line, label in zip(self.lines, all_labels):
-                line.set_data(x_data, self.history[label])
-        
-        return self.lines
+    def step(self):
+        t = time.time() - self.t0
+        # 寫一行。兩邊都可能是 NaN，照實記錄。
+        self.w.writerow([
+            f'{t:.3f}',
+            f'{self.F_fsr:.3f}',
+            f'{self.F_lc:.3f}',
+            self.last_unit,
+            self.last_status
+        ])
 
-    def save_to_csv(self, filename):
-        self.get_logger().info(f"正在將數據儲存至 {filename}...")
+    def destroy_node(self):
         try:
-            data_to_save = self.history
-            num_points = len(data_to_save['Average'])
-            if num_points == 0:
-                self.get_logger().warn("No data points to save.")
-                return
-
-            header = ['Sample', 'Force1', 'Force2', 'Average', 'GripperPos', 'F_target']
-            
-            with open(filename, 'w', newline='') as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerow(header)
-                for i in range(num_points):
-                    row = [
-                        i,
-                        data_to_save['Force1'][i],
-                        data_to_save['Force2'][i],
-                        data_to_save['Average'][i],
-                        data_to_save['GripperPos'][i],
-                        data_to_save['F_target'][i]
-                    ]
-                    writer.writerow(row)
-            self.get_logger().info(f"成功儲存 {num_points} 筆數據。")
-        except Exception as e:
-            self.get_logger().error(f"儲存 CSV 失敗: {e}")
+            self.stop_evt.set()
+            if hasattr(self, 'th'): self.th.join(timeout=0.5)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'fh'): self.fh.close()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'ser'): self.ser.close()
+        except Exception:
+            pass
+        super().destroy_node()
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--topic', default='/esp32/force')
+    ap.add_argument('--force_idx', type=int, default=2)      # 0=total
+    ap.add_argument('--port', default='/dev/ttyUSB1')
+    ap.add_argument('--baud', type=int, default=9600)
+    ap.add_argument('--out', default='force_pair_log.csv')
+    args = ap.parse_args()
+
     rclpy.init()
-    node = FSRPlotter()
-
-    ani = FuncAnimation(node.fig, node.update_plot, interval=50, blit=False)
-
-    def quit_handler(sig, frame):
-        print("\n偵測到 Ctrl-C，正在關閉節點...")
-        node.save_to_csv(node.output_filename)
-        plt.close('all')
+    node = PairLogger(args.topic, args.force_idx, args.port, args.baud, args.out)
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
         node.destroy_node()
-        rclpy.shutdown()
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, quit_handler)
-
-    plt.show()
-
-    node.save_to_csv(node.output_filename)
-    if rclpy.ok():
-        node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 if __name__ == '__main__':
     main()

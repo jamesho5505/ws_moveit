@@ -4,8 +4,6 @@ from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray
 import time
 
-PAIR_RE = re.compile(r'([A-Za-z0-9_]+)(?:\([^)]+\))?=([+-]?(?:\d+(?:\.\d+)?))')
-
 class FSRSerial(Node):
     def __init__(self, port, baud, topic):
         super().__init__('fsr_serial_node')
@@ -19,29 +17,22 @@ class FSRSerial(Node):
         t1 = time.perf_counter_ns()
         if not line:
             return
-        # pairs = dict(PAIR_RE.findall(line))
-        # try:
-        #     f1 = float(pairs.get('Force1', 'nan'))
-        #     f2 = float(pairs.get('Force2', 'nan'))
-        # except ValueError:
-        #     return
-        f1 = float('nan'); f2 = float('nan')
+        f1 = float('nan'); f2 = float('nan'); f_total = float('nan')
         parts = line.split(',')
-        if len(parts) == 2:
+        if len(parts) == 3:
             try:
                 f1 = float(parts[0].strip())
                 f2 = float(parts[1].strip())
+                f_total = float(parts[2].strip())
             except Exception:
                 return
         else:
             return  # 不是 CSV 兩欄就略過
 
-        if math.isnan(f1) or math.isnan(f2):
+        if any(math.isnan(x) for x in [f_total, f1, f2]):
             return
         msg = Float32MultiArray()
-        f1 = max(0.0, f1)
-        f2 = max(0.0, f2)
-        msg.data = [f1, f2, 0.5*(f1+f2)]
+        msg.data = [f1, f2, f_total]
         t2 = time.perf_counter_ns()
         self.pub.publish(msg)
         t3 = time.perf_counter_ns()
@@ -54,9 +45,9 @@ class FSRSerial(Node):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--port', default='/dev/ttyACM0')
-    ap.add_argument('--baud', type=int, default=460800)
-    ap.add_argument('--topic', default='arduino/force')
+    ap.add_argument('--port', default='/dev/ttyUSB0')
+    ap.add_argument('--baud', type=int, default=115200)
+    ap.add_argument('--topic', default='esp32/force')
     args = ap.parse_args()
 
     rclpy.init()
