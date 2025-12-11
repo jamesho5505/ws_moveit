@@ -25,9 +25,9 @@ import robotiq_gripper as rq
 \
 
 # instrument.serial.baudrate = 115200         # Baud
-myGripper = rq.RobotiqGripper(portname='/dev/ttyUSB1')
+myGripper = rq.RobotiqGripper(portname='/dev/ttyUSB0')
 myGripper.printInfo()
-# myGripper.resetActivate()   #activate()
+myGripper.resetActivate()   #activate()
 time.sleep(1)
 # myGripper.calibrate(0,85)
 saved_a = -0.3744493392070485
@@ -43,10 +43,10 @@ myGripper.printInfo()
 # myGripper.printInfo()
 current_pos = myGripper.getPositionmm()
 print("current pos:", current_pos)
-time.sleep(1.5)
-print("85")
-myGripper.goTomm(85,255,255)
 time.sleep(0.5)
+print("85")
+# myGripper.goTomm(85,255,255)
+# time.sleep(2.5)
 print("30")
 myGripper.goTomm(30,255,255)
 myGripper.printInfo()

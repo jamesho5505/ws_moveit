@@ -20,7 +20,7 @@ class RobotiqGripperNode(Node):
         super().__init__('robotiq_gripper_node')
 
         # 1. 宣告參數
-        self.declare_parameter('portname', '/dev/ttyUSB1')
+        self.declare_parameter('portname', '/dev/ttyUSB0')
         self.declare_parameter('slaveaddress', 9)
         self.declare_parameter('baudrate', 115200)
 
