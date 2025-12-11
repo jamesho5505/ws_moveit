@@ -7,8 +7,8 @@ import matplotlib.pyplot as plt
 save_dir = "frames_visualization"
 os.makedirs(save_dir, exist_ok=True)
 img_paths = []
-F_meas_list = np.load("/home/jamesho5055/ws_moveit/1104_2/F_meas.npy")
-F_comp_list = np.load("/home/jamesho5055/ws_moveit/1104_2/F_comp_list.npy")
+F_meas_list = np.load("/home/jamesho5055/ws_moveit/F_meas_1117_5hz_nooffset.npy")
+# F_comp_list = np.load("/home/jamesho5055/ws_moveit/1104_2/F_comp_list.npy")
 
 # ------------------ helpers ------------------
 def Rx(deg):
@@ -53,19 +53,36 @@ def set_axes_equal(ax):
     ax.set_zlim3d([centers[2]-radius, centers[2]+radius])
 
 # ------------------ provided list ------------------
+# old paper
+# R_list = [
+#     [[0,0,1],[1,0,0],[0,1,0]],   [[0,0,-1],[1,0,0],[0,-1,0]],
+#     [[0,-1,0],[1,0,0],[0,0,1]],  [[0,1,0],[1,0,0],[0,0,-1]],
+#     [[1,0,0],[0,0,-1],[0,1,0]],  [[1,0,0],[0,0,1],[0,-1,0]],
+#     [[1,0,0],[0,1,0],[0,0,1]],   [[1,0,0],[0,-1,0],[0,0,-1]],
+#     [[0,0,1],[0,1,0],[-1,0,0]],  [[0,0,-1],[0,1,0],[1,0,0]],
+#     [[-1,0,0],[0,-1,0],[0,0,1]], [[-1,0,0],[0,1,0],[0,0,-1]],
+#     [[0,1,0],[0,0,-1],[-1,0,0]], [[0,1,0],[0,0,1],[1,0,0]],
+#     [[0,1,0],[-1,0,0],[0,0,1]],  [[0,1,0],[1,0,0],[0,0,-1]],
+#     [[0,0,1],[0,1,0],[-1,0,0]],  [[0,0,1],[0,-1,0],[1,0,0]],
+#     [[0,0,1],[1,0,0],[0,1,0]],   [[0,0,1],[-1,0,0],[0,-1,0]],
+#     [[0,-1,0],[0,0,1],[-1,0,0]], [[0,1,0],[0,0,1],[1,0,0]],
+#     [[1,0,0],[0,0,1],[0,-1,0]],  [[-1,0,0],[0,0,1],[0,1,0]],
+# ]
+
+# new paper
 R_list = [
-    [[0,0,1],[1,0,0],[0,1,0]],   [[0,0,-1],[1,0,0],[0,-1,0]],
-    [[0,-1,0],[1,0,0],[0,0,1]],  [[0,1,0],[1,0,0],[0,0,-1]],
-    [[1,0,0],[0,0,-1],[0,1,0]],  [[1,0,0],[0,0,1],[0,-1,0]],
     [[1,0,0],[0,1,0],[0,0,1]],   [[1,0,0],[0,-1,0],[0,0,-1]],
-    [[0,0,1],[0,1,0],[-1,0,0]],  [[0,0,-1],[0,1,0],[1,0,0]],
-    [[-1,0,0],[0,-1,0],[0,0,1]], [[-1,0,0],[0,1,0],[0,0,-1]],
-    [[0,1,0],[0,0,-1],[-1,0,0]], [[0,1,0],[0,0,1],[1,0,0]],
-    [[0,1,0],[-1,0,0],[0,0,1]],  [[0,1,0],[1,0,0],[0,0,-1]],
-    [[0,0,1],[0,1,0],[-1,0,0]],  [[0,0,1],[0,-1,0],[1,0,0]],
-    [[0,0,1],[1,0,0],[0,1,0]],   [[0,0,1],[-1,0,0],[0,-1,0]],
-    [[0,-1,0],[0,0,1],[-1,0,0]], [[0,1,0],[0,0,1],[1,0,0]],
-    [[1,0,0],[0,0,1],[0,-1,0]],  [[-1,0,0],[0,0,1],[0,1,0]],
+    [[1,0,0],[0,0,-1],[0,1,0]],  [[1,0,0],[0,0,1],[0,-1,0]],
+    [[-1,0,0],[0,1,0],[0,0,-1]],  [[-1,0,0],[0,-1,0],[0,0,1]],
+    [[-1,0,0],[0,0,1],[0,1,0]],   [[-1,0,0],[0,0,-1],[0,-1,0]],
+    [[0,1,0],[1,0,0],[0,0,-1]],  [[0,-1,0],[1,0,0],[0,0,1]],
+    [[0,0,1],[1,0,0],[0,1,0]], [[0,0,-1],[1,0,0],[0,-1,0]],
+    [[0,1,0],[-1,0,0],[0,0,1]], [[0,-1,0],[-1,0,0],[0,0,-1]],
+    [[0,0,-1],[-1,0,0],[0,1,0]],  [[0,0,1],[-1,0,0],[0,-1,0]],
+    [[0,1,0],[0,0,1],[1,0,0]],  [[0,-1,0],[0,0,-1],[1,0,0]],
+    [[0,0,-1],[0,1,0],[1,0,0]],   [[0,0,1],[0,-1,0],[1,0,0]],
+    [[0,1,0],[0,0,-1],[-1,0,0]], [[0,-1,0],[0,0,1],[-1,0,0]],
+    [[0,0,1],[0,1,0],[-1,0,0]],  [[0,0,-1],[0,-1,0],[-1,0,0]],
 ]
 R_list = [np.array(Ri, dtype=float) for Ri in R_list]
 
@@ -116,25 +133,26 @@ for idx in range(len(R_list)):
     # 加上力量箭頭（以 sensor 原點為起點）
     
     F_meas = F_meas_list[idx]
-    F_meas = F_meas_list[idx]              # in sensor
-    F0_s = F_meas - Fb                     # 去偏，仍在 sensor
-    sgn = 1.0 if np.dot(F0_s/np.linalg.norm(F0_s), -g_s) >= 0 else -1.0
+    F_meas_b = R_b2s @ F_meas  # 轉回 base 座標
+    # F_meas = F_meas_list[idx]              # in sensor
+    # F0_s = F_meas - Fb                     # 去偏，仍在 sensor
+    # sgn = 1.0 if np.dot(F0_s/np.linalg.norm(F0_s), -g_s) >= 0 else -1.0
     L = 0.2
 
-    F_res_s = F_comp_list[idx]                 # in sensor
-    F_res_b = R_b2s @ F_res_s                  # to base
-    F_par_s = np.dot(F_res_s, g_s) * g_s
-    F_perp_s = F_res_s - F_par_s
+    # F_res_s = F_comp_list[idx]                 # in sensor
+    # F_res_b = R_b2s @ F_res_s                  # to base
+    # F_par_s = np.dot(F_res_s, g_s) * g_s
+    # F_perp_s = F_res_s - F_par_s
 
-    ax.quiver(origin_sensor[0], origin_sensor[1], origin_sensor[2],
-          F_res_b[0], F_res_b[1], F_res_b[2],
-          length=0.1, normalize=False, linewidth=3, color='m', label='F_res')
-    ax.text(origin_sensor[0], origin_sensor[1], origin_sensor[2]-0.08,
-        f"|F_res|={np.linalg.norm(F_res_s):.2f} N", fontsize=8)
+    # ax.quiver(origin_sensor[0], origin_sensor[1], origin_sensor[2],
+    #       F_res_b[0], F_res_b[1], F_res_b[2],
+    #       length=0.1, normalize=False, linewidth=3, color='m', label='F_res')
+    # ax.text(origin_sensor[0], origin_sensor[1], origin_sensor[2]-0.08,
+    #     f"|F_res|={np.linalg.norm(F_res_s):.2f} N", fontsize=8)
 
-    F_comp = F_comp_list[idx]
-    F_comp_b = R_b2s @ F_comp              # to base
-    scale = 0.25 / (np.linalg.norm(F_comp_b) + 1e-9)  # 讓箭頭不會太長
+    # F_comp = F_comp_list[idx]
+    # F_comp_b = R_b2s @ F_comp              # to base
+    # scale = 0.25 / (np.linalg.norm(F_comp_b) + 1e-9)  # 讓箭頭不會太長
     # ax.quiver(origin_sensor[0], origin_sensor[1], origin_sensor[2],
     #         (F_comp_b*scale)[0], (F_comp_b*scale)[1], (F_comp_b*scale)[2],
     #         length=1.0, normalize=False, linewidth=2, color='m', label='F_comp (magnitude)')
@@ -145,15 +163,26 @@ for idx in range(len(R_list)):
     #     color='m', length=L, normalize=True, linewidth=5, label='F_comp'
     # )
 
-    # ax.quiver(
-    #     origin_sensor[0], origin_sensor[1], origin_sensor[2],
-    #     F_meas[0], F_meas[1], F_meas[2],
-    #     color='c', length=L, normalize=True, linewidth=5, label='F_meas'
-    # )
+    ax.quiver(
+        origin_sensor[0], origin_sensor[1], origin_sensor[2],
+        F_meas[0], F_meas[1], F_meas[2],
+        color='c', length=L, normalize=True, linewidth=5, label='F_meas'
+    )
+
+    ax.quiver(
+        origin_sensor[0], origin_sensor[1], origin_sensor[2],
+        F_meas_b[0], F_meas_b[1], F_meas_b[2],
+        color='orange', length=L, normalize=True, linewidth=3, label='F_meas (base)'
+    )
 
     ax.quiver(origin_sensor[0], origin_sensor[1], origin_sensor[2],
           g_dir_in_base[0], g_dir_in_base[1], g_dir_in_base[2],
           length=L, normalize=True, linewidth=3, color='k', label='gravity dir')
+    
+    # ax.quiver(origin_sensor[0], origin_sensor[1], origin_sensor[2],
+    #       g_b[0], g_b[1], g_b[2],
+    #       length=L, normalize=True, linewidth=3, color='pink', label='gravity base')
+    
     # 在圖旁標出重力在 sensor 座標的分量，方便核對
     ax.text(origin_sensor[0], origin_sensor[1] + 0.05, origin_sensor[2] + 0.05,
             f"g_s = [{g_s[0]:.3f}, {g_s[1]:.3f}, {g_s[2]:.3f}]", fontsize=8, color='k')
@@ -167,14 +196,16 @@ for idx in range(len(R_list)):
     # set viewing angle
     ax.view_init(elev=22, azim=35)
     set_axes_equal(ax)
-    # plt.show()
+    plt.show()
     plt.tight_layout()
-    img_path = os.path.join(save_dir, f"frame_{idx+1:02d}.png")
+    img_path = os.path.join(save_dir, f"frame_{idx+1:02d}_meas_5hz_nooffset.png")
     plt.savefig(img_path)
     img_paths.append(img_path)
     # plt.show(block=False)
     # plt.pause(0.2)  # 顯示0.5秒
     plt.close(fig)
+
+    print(g_s)
 
    
 

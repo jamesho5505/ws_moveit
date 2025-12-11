@@ -8,7 +8,7 @@ Fx, Fy, Fz = [], [], []
 Tx, Ty, Tz = [], [], []
 
 for i in range(1, 25):  # 若有 R_1.csv ~ R_24.csv，要到 15
-    file = f"/home/jamesho5055/ws_moveit/R{i}.csv"
+    file = f"/home/jamesho5055/ws_moveit/1117_5hz_nooffset/R{i}.csv"
     # file = f"wenyu/R{i}.csv"
     fxi, fyi, fzi = [], [], []
     txi, tyi, tzi = [], [], []
@@ -16,7 +16,11 @@ for i in range(1, 25):  # 若有 R_1.csv ~ R_24.csv，要到 15
         reader = csv.reader(f)
         next(reader)  # skip header
         count = 0
-        for row in reader:
+        for idx, row in enumerate(reader):
+            if idx < 50:
+                continue  # skip first 50 lines to avoid transient
+            elif idx >= 200:
+                break  # only read 500 lines after skipping
             # if count >= 500:
             #     break
             fx, fy, fz, tx, ty, tz = map(float, row[1:])
@@ -35,16 +39,11 @@ for i in range(1, 25):  # 若有 R_1.csv ~ R_24.csv，要到 15
     Tx.append(np.mean(txi))
     Ty.append(np.mean(tyi))
     Tz.append(np.mean(tzi))
-    if i == 1:
-        Fb_soft = np.array([np.median(fxi), np.median(fyi), np.median(fzi)])
-        Tb_soft = np.array([np.median(txi), np.median(tyi), np.median(tzi)])
 
 # 轉 numpy 陣列 (24,3)
 F_meas = np.column_stack([Fx, Fy, Fz])
 Tau_meas = np.column_stack([Tx, Ty, Tz])
 # print("F_meas:", F_meas)
-# F_meas_z = F_meas - Fb_soft
-# Tau_meas_z = Tau_meas - Tb_soft
 
 
 # 計算重力補償參數
@@ -60,8 +59,8 @@ def estimate_params(F_meas, Tau_meas, R_list, g=9.80665):
     y = F_meas.reshape(-1, order='F')               # (3K,)
     beta, *_ = np.linalg.lstsq(X, y, rcond=None)
     b_scalar = beta[0]         # 平均偏差投到三軸會有殘差，下面再單軸修正
-    # m = beta[1]
-    m = 1.040
+    m = beta[1]
+    # m = 1.040
 
     # 更精細：各軸分別帶截距以取 b_x,b_y,b_z（m 固定）
     b = []
@@ -108,19 +107,47 @@ def compensate(F_meas, Tau_meas, R, Fb, Tau_b, m, r, g=9.80665):
     T_contact = Tau_meas - Tau_b - Tg
     return F_contact, T_contact
 
+def eval_pose(F_comp, R):
+    g = 9.80665
+    gI = np.array([0,0,-g])
+    gs = R.T @ gI          # world→sensor
+    u = gs / np.linalg.norm(gs)
+
+    F_along = float(F_comp @ u)                 # 沿重力
+    F_perp  = float(np.linalg.norm(F_comp - F_along*u))
+    m_est   = F_along / g
+    return m_est, F_perp
+
+# old paper
+# R_list = [
+#     [[0,0,1],[1,0,0],[0,1,0]],   [[0,0,-1],[1,0,0],[0,-1,0]],
+#     [[0,-1,0],[1,0,0],[0,0,1]],  [[0,1,0],[1,0,0],[0,0,-1]],
+#     [[1,0,0],[0,0,-1],[0,1,0]],  [[1,0,0],[0,0,1],[0,-1,0]],
+#     [[1,0,0],[0,1,0],[0,0,1]],   [[1,0,0],[0,-1,0],[0,0,-1]],
+#     [[0,0,1],[0,1,0],[-1,0,0]],  [[0,0,-1],[0,1,0],[1,0,0]],
+#     [[-1,0,0],[0,-1,0],[0,0,1]], [[-1,0,0],[0,1,0],[0,0,-1]],
+#     [[0,1,0],[0,0,-1],[-1,0,0]], [[0,1,0],[0,0,1],[1,0,0]],
+#     [[0,1,0],[-1,0,0],[0,0,1]],  [[0,1,0],[1,0,0],[0,0,-1]],
+#     [[0,0,1],[0,1,0],[-1,0,0]],  [[0,0,1],[0,-1,0],[1,0,0]],
+#     [[0,0,1],[1,0,0],[0,1,0]],   [[0,0,1],[-1,0,0],[0,-1,0]],
+#     [[0,-1,0],[0,0,1],[-1,0,0]], [[0,1,0],[0,0,1],[1,0,0]],
+#     [[1,0,0],[0,0,1],[0,-1,0]],  [[-1,0,0],[0,0,1],[0,1,0]],
+# ]
+
+# new paper
 R_list = [
-    [[0,0,1],[1,0,0],[0,1,0]],   [[0,0,-1],[1,0,0],[0,-1,0]],
-    [[0,-1,0],[1,0,0],[0,0,1]],  [[0,1,0],[1,0,0],[0,0,-1]],
-    [[1,0,0],[0,0,-1],[0,1,0]],  [[1,0,0],[0,0,1],[0,-1,0]],
     [[1,0,0],[0,1,0],[0,0,1]],   [[1,0,0],[0,-1,0],[0,0,-1]],
-    [[0,0,1],[0,1,0],[-1,0,0]],  [[0,0,-1],[0,1,0],[1,0,0]],
-    [[-1,0,0],[0,-1,0],[0,0,1]], [[-1,0,0],[0,1,0],[0,0,-1]],
-    [[0,1,0],[0,0,-1],[-1,0,0]], [[0,1,0],[0,0,1],[1,0,0]],
-    [[0,1,0],[-1,0,0],[0,0,1]],  [[0,1,0],[1,0,0],[0,0,-1]],
-    [[0,0,1],[0,1,0],[-1,0,0]],  [[0,0,1],[0,-1,0],[1,0,0]],
-    [[0,0,1],[1,0,0],[0,1,0]],   [[0,0,1],[-1,0,0],[0,-1,0]],
-    [[0,-1,0],[0,0,1],[-1,0,0]], [[0,1,0],[0,0,1],[1,0,0]],
-    [[1,0,0],[0,0,1],[0,-1,0]],  [[-1,0,0],[0,0,1],[0,1,0]],
+    [[1,0,0],[0,0,-1],[0,1,0]],  [[1,0,0],[0,0,1],[0,-1,0]],
+    [[-1,0,0],[0,1,0],[0,0,-1]],  [[-1,0,0],[0,-1,0],[0,0,1]],
+    [[-1,0,0],[0,0,1],[0,1,0]],   [[-1,0,0],[0,0,-1],[0,-1,0]],
+    [[0,1,0],[1,0,0],[0,0,-1]],  [[0,-1,0],[1,0,0],[0,0,1]],
+    [[0,0,1],[1,0,0],[0,1,0]], [[0,0,-1],[1,0,0],[0,-1,0]],
+    [[0,1,0],[-1,0,0],[0,0,1]], [[0,-1,0],[-1,0,0],[0,0,-1]],
+    [[0,0,-1],[-1,0,0],[0,1,0]],  [[0,0,1],[-1,0,0],[0,-1,0]],
+    [[0,1,0],[0,0,1],[1,0,0]],  [[0,-1,0],[0,0,-1],[1,0,0]],
+    [[0,0,-1],[0,1,0],[1,0,0]],   [[0,0,1],[0,-1,0],[1,0,0]],
+    [[0,1,0],[0,0,-1],[-1,0,0]], [[0,-1,0],[0,0,1],[-1,0,0]],
+    [[0,0,1],[0,1,0],[-1,0,0]],  [[0,0,-1],[0,-1,0],[-1,0,0]],
 ]
 
 assert len(R_list) == F_meas.shape[0] == Tau_meas.shape[0]
@@ -144,9 +171,9 @@ plt.xlabel('Pose index')
 plt.ylabel('|Residual Force| (N)')
 # plt.show()
 
-np.save("/home/jamesho5055/ws_moveit/1104_2/F_meas.npy", F_meas)
-F_comp_list = [compensate(F_meas[i], Tau_meas[i], R, Fb, Tau_b, m, r)[0] for i,R in enumerate(R_list)]
-np.save("/home/jamesho5055/ws_moveit/1104_2/F_comp_list.npy", F_comp_list)
+np.save("/home/jamesho5055/ws_moveit/F_meas.npy", F_meas)
+# F_comp_list = [compensate(F_meas[i], Tau_meas[i], R, Fb, Tau_b, m, r)[0] for i,R in enumerate(R_list)]
+# np.save("/home/jamesho5055/ws_moveit/1104_2/F_comp_list.npy", F_comp_list)
 
 # F_meas_obj_1 = np.array([0.173,0.420,1.876])
 # Tau_meas_obj_1 = np.array([0.023,-0.006,-0.001])
@@ -176,35 +203,40 @@ np.save("/home/jamesho5055/ws_moveit/1104_2/F_comp_list.npy", F_comp_list)
 # Tau_meas_obj_7 = np.array([0.261,-0.112,0.203])
 # R_obj_7 = R_list[6]
 
-F_meas_obj_1 = np.array([-0.05409,0.09723,1.876])
-Tau_meas_obj_1 = np.array([0.023,-0.006,-0.001])
-R_obj_1 = R_list[7]
+F_meas_obj = np.array([0.32257 ,1.07944,0.90367])
+Tau_meas_obj = np.array([-0.02215,0.03524 ,0.01718])
+R_obj = R_list[1]
 
-F_meas_obj_2 = [1.35, -11.98, -10.145]
-Tau_meas_obj_2 = [1.156, -0.089, 0.136]
-R_obj_2 = R_list[4]   # 夾重物時的旋轉矩陣
+F_meas_obj_1 = np.array([-1.31743,-7.63508,-12.37117])
+Tau_meas_obj_1 = np.array([0.40910,0.12754 ,0.07895])
+R_obj_1 = R_list[2]
 
-F_meas_obj_3 = [11.62, 1.2, -13.0]
-Tau_meas_obj_3 = [-0.045, 1.089, -0.009]
-R_obj_3 = R_list[12]   # 夾重物時的旋轉矩陣
+F_meas_obj_2 = [10.7836250085091, -0.13498400824119, -8.3183042102973]
+Tau_meas_obj_2 = [0.0800441536640686, 0.466352959410817, -0.0338959178874412]
+R_obj_2 = R_list[20]   # 夾重物時的旋轉矩陣
 
-F_meas_obj_4 = np.array([0.280,-0.015,1.987])
-Tau_meas_obj_4 = np.array([0.013,-0.01,-0.001])
-R_obj_4 = R_list[7]
+# F_meas_obj_3 = [11.62, 1.2, -13.0]
+# Tau_meas_obj_3 = [-0.045, 1.089, -0.009]
+# R_obj_3 = R_list[12]   # 夾重物時的旋轉矩陣
 
-F_meas_obj_5 = [-14.864, -0.389, -8.435]
-Tau_meas_obj_5 = [0.083, -1.065, 0.078]
-R_obj_5 = R_list[13]   # 夾重物時的旋轉矩陣
+# F_meas_obj_4 = np.array([0.280,-0.015,1.987])
+# Tau_meas_obj_4 = np.array([0.013,-0.01,-0.001])
+# R_obj_4 = R_list[7]
 
-F_meas_obj_6 = [1.35, 11.78, -8.389]
-Tau_meas_obj_6 = [1.051, -0.0389, 0.197]
-R_obj_6 = R_list[5]   # 夾重物時的旋轉矩陣
+# F_meas_obj_5 = [-14.864, -0.389, -8.435]
+# Tau_meas_obj_5 = [0.083, -1.065, 0.078]
+# R_obj_5 = R_list[13]   # 夾重物時的旋轉矩陣
 
-F_meas_obj_7 = np.array([3.25,0.983,-21.954])
-Tau_meas_obj_7 = np.array([0.261,-0.112,0.203])
-R_obj_7 = R_list[6]
+# F_meas_obj_6 = [1.35, 11.78, -8.389]
+# Tau_meas_obj_6 = [1.051, -0.0389, 0.197]
+# R_obj_6 = R_list[5]   # 夾重物時的旋轉矩陣
 
-m_obj = 269.5 / 1000.0  # kg
+# F_meas_obj_7 = np.array([3.25,0.983,-21.954])
+# Tau_meas_obj_7 = np.array([0.261,-0.112,0.203])
+# R_obj_7 = R_list[6]
+
+# m_obj = 269.5 / 1000.0  # kg
+# m_obj = 548.3 / 1000.0  # kg
 # # 補償
 
 # print("補償後的力:", F_comp)
@@ -213,7 +245,7 @@ m_obj = 269.5 / 1000.0  # kg
 # F_meas_obj = F_meas[n-1]
 g = 9.80665
 gI = np.array([0,0,-g])
-for R in [R_obj_1, R_obj_2, R_obj_3, R_obj_4, R_obj_5, R_obj_6, R_obj_7]:
+for R in R_list:#[R_obj, R_obj_1, R_obj_2]:#, R_obj_3, R_obj_4, R_obj_5, R_obj_6, R_obj_7]:
     gs = R.T @ gI                # world→sensor
     Fg_est = m * gs
     print("expected weight dir =", gs/np.linalg.norm(gs))
@@ -223,26 +255,33 @@ for R in [R_obj_1, R_obj_2, R_obj_3, R_obj_4, R_obj_5, R_obj_6, R_obj_7]:
 # Tau_meas_obj = np.array([-0.003,-0.001,-0.001])
 # R_obj = R_list[7]
 
-F_meas_obj = np.array([0.02726,0.07942,0.03219])
-Tau_meas_obj = np.array([-0.00125,-0.00040,0.00008])
-R_obj = R_list[7]
+
 # m = 1.413
 # r = np.array([-0.0017, -0.000, 0.0717])
 F_comp, Tau_comp = compensate(F_meas_obj, Tau_meas_obj, R_obj, Fb, Tau_b, m, r)
 F_comp_1, Tau_comp_1 = compensate(F_meas_obj_1, Tau_meas_obj_1, R_obj_1, Fb, Tau_b, m, r)
 F_comp_2, Tau_comp_2 = compensate(F_meas_obj_2, Tau_meas_obj_2, R_obj_2, Fb, Tau_b, m, r)
-F_comp_3, Tau_comp_3 = compensate(F_meas_obj_3, Tau_meas_obj_3, R_obj_3, Fb, Tau_b, m, r)
-F_comp_4, Tau_comp_4 = compensate(F_meas_obj_4, Tau_meas_obj_4, R_obj_4, Fb, Tau_b, m, r)
-F_comp_5, Tau_comp_5 = compensate(F_meas_obj_5, Tau_meas_obj_5, R_obj_5, Fb, Tau_b, m, r)
-F_comp_6, Tau_comp_6 = compensate(F_meas_obj_6, Tau_meas_obj_6, R_obj_6, Fb, Tau_b, m, r)
-F_comp_7, Tau_comp_7 = compensate(F_meas_obj_7, Tau_meas_obj_7, R_obj_7, Fb, Tau_b, m, r)
+# F_comp_3, Tau_comp_3 = compensate(F_meas_obj_3, Tau_meas_obj_3, R_obj_3, Fb, Tau_b, m, r)
+# F_comp_4, Tau_comp_4 = compensate(F_meas_obj_4, Tau_meas_obj_4, R_obj_4, Fb, Tau_b, m, r)
+# F_comp_5, Tau_comp_5 = compensate(F_meas_obj_5, Tau_meas_obj_5, R_obj_5, Fb, Tau_b, m, r)
+# F_comp_6, Tau_comp_6 = compensate(F_meas_obj_6, Tau_meas_obj_6, R_obj_6, Fb, Tau_b, m, r)
+# F_comp_7, Tau_comp_7 = compensate(F_meas_obj_7, Tau_meas_obj_7, R_obj_7, Fb, Tau_b, m, r)
 
-print(f"補償後的力:{F_comp} |F|={ np.linalg.norm(F_comp/9.81):.4f} kg")
-print(f"理論重物重量:{ m_obj * 9.80665:.4f} N, {m_obj:.4f} kg")
-print(f"補償後力大小_1:{F_comp_1} |F_1|={ np.linalg.norm(F_comp_1/9.81):.4f} kg")
-print(f"補償後力大小_2:{F_comp_2} |F_2|={ np.linalg.norm(F_comp_2/9.81):.4f} kg")
-print(f"補償後力大小_3:{F_comp_3} |F_3|={ np.linalg.norm(F_comp_3/9.81):.4f} kg")
-print(f"補償後力大小_4:{F_comp_4} |F_4|={ np.linalg.norm(F_comp_4/9.81):.4f} kg")
-print(f"補償後力大小_5:{F_comp_5} |F_5|={ np.linalg.norm(F_comp_5/9.81):.4f} kg")
-print(f"補償後力大小_6:{F_comp_6} |F_6|={ np.linalg.norm(F_comp_6/9.81):.4f} kg")
-print(f"補償後力大小_7:{F_comp_7} |F_7|={ np.linalg.norm(F_comp_7/9.81):.4f} kg")
+F_0_pose = eval_pose(F_comp, R_obj)
+F_1_pose = eval_pose(F_comp_1, R_obj_1)
+F_2_pose = eval_pose(F_comp_2, R_obj_2)
+# F_3_pose = eval_pose(F_comp_3, R_obj_3)
+# F_4_pose = eval_pose(F_comp_4, R_obj_4)
+# F_5_pose = eval_pose(F_comp_5, R_obj_5)
+# F_6_pose = eval_pose(F_comp_6, R_obj_6)
+# F_7_pose = eval_pose(F_comp_7, R_obj_7)
+
+print(f"補償後的力:{F_comp} |F|={ np.linalg.norm(F_comp/9.81):.4f} kg F_0_pose={F_0_pose}")
+# print(f"理論重物重量:{ m_obj * 9.80665:.4f} N, {m_obj:.4f} kg")
+print(f"補償後力大小_1:{F_comp_1} |F_1|={ np.linalg.norm(F_comp_1/9.81):.4f} kg F_1_pose={F_1_pose}")
+print(f"補償後力大小_2:{F_comp_2} |F_2|={ np.linalg.norm(F_comp_2/9.81):.4f} kg F_2_pose={F_2_pose}")
+# print(f"補償後力大小_3:{F_comp_3} |F_3|={ np.linalg.norm(F_comp_3):.4f} N F_3_pose={F_3_pose}")
+# print(f"補償後力大小_4:{F_comp_4} |F_4|={ np.linalg.norm(F_comp_4):.4f} N F_4_pose={F_4_pose}")
+# print(f"補償後力大小_5:{F_comp_5} |F_5|={ np.linalg.norm(F_comp_5):.4f} N F_5_pose={F_5_pose}")
+# print(f"補償後力大小_6:{F_comp_6} |F_6|={ np.linalg.norm(F_comp_6):.4f} N F_6_pose={F_6_pose}")
+# print(f"補償後力大小_7:{F_comp_7} |F_7|={ np.linalg.norm(F_comp_7):.4f} N F_7_pose={F_7_pose}")

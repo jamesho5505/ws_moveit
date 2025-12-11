@@ -516,3 +516,40 @@ if __name__ == "__main__":
 #     #         degs = [math.degrees(t) for t in sol]
 #     #         print(f"✅ IK 解{i+1} (rad)：", [f"{t:+.4f}" for t in sol])
 #     #         print("        (deg)：", [f"{d:+.1f}°" for d in degs])
+from urdf_parser_py.urdf import URDF
+from kdl_parser_py.urdf import treeFromUrdfModel
+import PyKDL as kdl
+import numpy as np
+
+# 1. 讀 URDF
+robot_urdf = URDF.from_xml_file("tm5-900.urdf")
+success, kdl_tree = treeFromUrdfModel(robot_urdf)
+
+kdl_chain = kdl_tree.getChain("base", "flange")
+
+fk_solver = kdl.ChainFkSolverPos_recursive(kdl_chain)
+
+# 2. 建 KDL joint array
+joint_count = kdl_chain.getNrOfJoints()
+joint_array = kdl.JntArray(joint_count)
+
+# 依照 chain 的 joint 順序填入校正姿勢 joint 角度
+joint_array[0] = q1
+joint_array[1] = q2
+joint_array[2] = q3
+joint_array[3] = q4
+joint_array[4] = q5
+joint_array[5] = q6
+
+# 3. 算 FK: base → flange
+flange_frame = kdl.Frame()
+fk_solver.JntToCart(joint_array, flange_frame)
+
+# 轉成 4x4 numpy 矩陣
+base_to_flange_transform_matrix = np.eye(4)
+for row_index in range(3):
+    for col_index in range(3):
+        base_to_flange_transform_matrix[row_index, col_index] = flange_frame.M[row_index, col_index]
+base_to_flange_transform_matrix[0, 3] = flange_frame.p[0]
+base_to_flange_transform_matrix[1, 3] = flange_frame.p[1]
+base_to_flange_transform_matrix[2, 3] = flange_frame.p[2]

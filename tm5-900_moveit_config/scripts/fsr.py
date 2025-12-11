@@ -45,7 +45,7 @@ class FSRSerial(Node):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--port', default='/dev/ttyUSB0')
+    ap.add_argument('--port', default='/dev/ttyUSB1')
     ap.add_argument('--baud', type=int, default=115200)
     ap.add_argument('--topic', default='esp32/force')
     args = ap.parse_args()
