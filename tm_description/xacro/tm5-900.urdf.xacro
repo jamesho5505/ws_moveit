@@ -16,7 +16,10 @@
   <!-- you must modify 'macro.tm5-900-nominal.urdf.xacro' to 'user_defined.urdf.xacro'  -->
   <xacro:include filename="$(find tm_description)/xacro/macro.tm5-900-nominal.urdf.xacro" />
   <xacro:include filename="$(find realsense2_description)/urdf/_d435.urdf.xacro" />
+  <xacro:include filename="$(find robotiq_ft_sensor_description)/urdf/robotiq_ft300.urdf.xacro" />
+  <xacro:include filename="$(find robotiq_ft_sensor_description)/urdf/robotiq_fts.ros2_control.xacro" />
   <xacro:include filename="$(find robotiq_description)/urdf/robotiq_2f_85_macro.urdf.xacro" />
+
 
 
   <!-- === 2. 掛 Realsense D435 === -->
@@ -26,21 +29,31 @@
       <origin xyz="0.0 -0.0783 0.0157" rpy="0 ${-pi/2} ${-pi/2}"/> 
   </xacro:sensor_d435>
 
-  <!-- === 3. 掛 Robotiq 2F-85 === -->
-  <xacro:robotiq_gripper
+  <!-- === 3. 掛 力覺感測器 (Force Torque Sensor) === -->
+  <!-- Robotiq FT300 mounted at TM5 flange -->
+  <xacro:robotiq_ft300
       parent="flange"
+      tf_prefix="">
+    <origin xyz="0 0 -0.003" rpy="0 0 0"/>
+  </xacro:robotiq_ft300>
+
+
+  <!-- === 4. 掛 Robotiq 2F-85 === -->
+  <xacro:robotiq_gripper
+      parent="robotiq_ft_frame_id"
       prefix=""
-      name="robotiq_2f85_hw"
-      use_fake_hardware="true">
-      <!-- com_port="/dev/ttyUSB0" >            -->
-    <origin xyz="0 0 0.01" rpy="0 0 0"/>
+      name="robotiq_2f85"
+      use_fake_hardware="true"
+      >           
+    <origin xyz="0 0 0.0" rpy="0 0 ${pi/2}"/>
   </xacro:robotiq_gripper>
 
-  <link name="robotiq_tcp"/>
+  <link name="tcp"/>
    <joint name="robotiq_tcp_joint" type="fixed">
-     <parent link="robotiq_85_base_link"/>
-     <child link="robotiq_tcp"/>
-     <origin xyz="-0.00102 0.00006 0.18922" rpy="0 0 0"/>
+     <parent link="flange"/>
+     <child link="tcp"/>
+     <!-- <origin xyz="-0.001814 0.032587 0.197883" rpy="-0.001885 0.000590 0.003866"/> -->
+     <origin xyz="-0.0093 0.0315 0.1964" rpy="0 0 0"/>
    </joint>
 
 
