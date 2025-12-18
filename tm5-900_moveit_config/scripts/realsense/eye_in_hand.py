@@ -248,306 +248,6 @@
 # if __name__ == "__main__":
 #     main()
 
-#!/usr/bin/env python3
-import rclpy
-from rclpy.node import Node
-from sensor_msgs.msg import Image, CameraInfo
-from cv_bridge import CvBridge
-import cv2
-import numpy as np
-from tm_msgs.msg import FeedbackState
-from std_srvs.srv import Trigger
-import math
-
-class EyeInHandCalibration(Node):
-    def __init__(self):
-        super().__init__("eye_in_hand_calibration")
-
-        # Chessboard
-        self.cols = 7
-        self.rows = 9
-        self.square_size = 0.010
-        
-        # Camera
-        self.camera_matrix = None
-        self.dist_coeffs = None
-        self.bridge = CvBridge()
-        self.latest_color = None
-
-        # Robot state
-        self.latest_robot_pose = None  # [X, Y, Z, Rx, Ry, Rz]
-        
-        # 數據存儲
-        self.R_gripper2base_list = []  # Flange → Base 的旋轉
-        self.t_gripper2base_list = []  # Flange → Base 的平移
-        self.R_target2cam_list = []    # 棋盤格 → 相機的旋轉
-        self.t_target2cam_list = []    # 棋盤格 → 相機的平移
-        
-        self.sample_id = 0
-
-        # Subscribers
-        self.create_subscription(
-            CameraInfo, "/camera/camera/color/camera_info", self.cb_info, 10
-        )
-        self.create_subscription(
-            Image, "/camera/camera/color/image_raw", self.cb_color, 10
-        )
-        self.create_subscription(
-            FeedbackState, "/feedback_states", self.cb_feedback, 10
-        )
-
-        # Services
-        self.create_service(Trigger, 'capture_pose', self.srv_capture_pose)
-
-        cv2.namedWindow("camera_view", cv2.WINDOW_NORMAL)
-
-        self.get_logger().info("=" * 70)
-        self.get_logger().info("Eye-in-Hand Calibration (Standard Method)")
-        self.get_logger().info("=" * 70)
-        self.get_logger().info("Setup:")
-        self.get_logger().info("  - Camera mounted on robot arm (flange)")
-        self.get_logger().info("  - Chessboard FIXED on table")
-        self.get_logger().info("  - NO touching required!")
-        self.get_logger().info("")
-        self.get_logger().info("Instructions:")
-        self.get_logger().info("  1. Fix chessboard on table (DO NOT MOVE IT)")
-        self.get_logger().info("  2. Move robot to different positions/angles")
-        self.get_logger().info("  3. Press SPACE to capture each pose")
-        self.get_logger().info("  4. Collect 20-30 samples")
-        self.get_logger().info("  5. Press 'q' to compute calibration")
-        self.get_logger().info("")
-        self.get_logger().info("Tips:")
-        self.get_logger().info("  - Vary X, Y, Z positions")
-        self.get_logger().info("  - Vary Rx, Ry, Rz angles")
-        self.get_logger().info("  - Keep chessboard fully visible")
-        self.get_logger().info("=" * 70)
-        self.get_logger().info("")
-
-    def cb_info(self, msg):
-        if self.camera_matrix is None:
-            self.camera_matrix = np.array(msg.k).reshape(3, 3)
-            self.dist_coeffs = np.array(msg.d)
-            self.get_logger().info("✓ Camera intrinsics loaded")
-
-    def cb_feedback(self, msg: FeedbackState):
-        # 使用 tool0_pose（= flange）
-        self.latest_robot_pose = msg.tool0_pose  # [X, Y, Z, Rx, Ry, Rz]
-
-    def cb_color(self, msg):
-        self.latest_color = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-        
-        display_img = self.latest_color.copy()
-        
-        cv2.putText(display_img, "Press SPACE to capture pose", (10, 30), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        cv2.putText(display_img, f"Samples: {self.sample_id}/20-30", (10, 70),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
-        
-        if self.latest_robot_pose is not None:
-            robot_text = f"Flange: X={self.latest_robot_pose[0]:.3f} Y={self.latest_robot_pose[1]:.3f} Z={self.latest_robot_pose[2]:.3f}"
-            cv2.putText(display_img, robot_text, (10, 110),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        
-        cv2.imshow("camera_view", display_img)
-        
-        key = cv2.waitKey(10) & 0xFF
-
-        if key == ord(' '):
-            self.capture_pose()
-        elif key == ord('q'):
-            self.finish_calibration()
-            rclpy.shutdown()
-
-    def srv_capture_pose(self, request, response):
-        success = self.capture_pose()
-        response.success = success
-        response.message = f"Sample {self.sample_id-1} captured" if success else "Failed"
-        return response
-
-    def capture_pose(self):
-        """捕捉一組位姿數據（不需要觸碰）"""
-        if self.latest_color is None or self.camera_matrix is None:
-            self.get_logger().warn("Camera not ready")
-            return False
-
-        if self.latest_robot_pose is None:
-            self.get_logger().warn("Robot feedback not ready")
-            return False
-
-        # 檢測棋盤格
-        gray = cv2.cvtColor(self.latest_color, cv2.COLOR_BGR2GRAY)
-        found, corners = cv2.findChessboardCornersSB(
-            gray, (self.cols, self.rows),
-            flags=cv2.CALIB_CB_EXHAUSTIVE + cv2.CALIB_CB_ACCURACY
-        )
-
-        if not found:
-            self.get_logger().warn("⚠ Chessboard NOT found!")
-            return False
-
-        # 建立 3D 棋盤格模型
-        objp = np.zeros((self.cols * self.rows, 3), np.float32)
-        objp[:, :2] = np.mgrid[0:self.cols, 0:self.rows].T.reshape(-1, 2)
-        objp *= self.square_size
-
-        # PnP：計算棋盤格相對相機的位姿
-        ok, rvec, tvec = cv2.solvePnP(
-            objp, corners, self.camera_matrix, self.dist_coeffs
-        )
-        if not ok:
-            self.get_logger().warn("⚠ PnP failed!")
-            return False
-
-        R_target2cam, _ = cv2.Rodrigues(rvec)
-        t_target2cam = tvec.reshape(3, 1)
-
-        # 從 robot feedback 取得 Flange 位姿
-        X, Y, Z, Rx, Ry, Rz = self.latest_robot_pose
-
-        # 將 RPY 轉換為旋轉矩陣
-        R_gripper2base = self.rpy_to_rotation_matrix(Rx, Ry, Rz)
-        t_gripper2base = np.array([[X], [Y], [Z]])
-
-        # 儲存數據
-        self.R_gripper2base_list.append(R_gripper2base)
-        self.t_gripper2base_list.append(t_gripper2base)
-        self.R_target2cam_list.append(R_target2cam)
-        self.t_target2cam_list.append(t_target2cam)
-
-        # 視覺化
-        img_show = self.latest_color.copy()
-        cv2.drawChessboardCorners(img_show, (self.cols, self.rows), corners, True)
-        cv2.imshow("camera_view", img_show)
-        cv2.waitKey(1000)
-
-        self.get_logger().info(f"✓ Sample #{self.sample_id} captured")
-        self.sample_id += 1
-        
-        return True
-
-    def finish_calibration(self):
-        """計算手眼標定"""
-        if len(self.R_gripper2base_list) < 5:
-            self.get_logger().error(f"Not enough samples! Got {len(self.R_gripper2base_list)}, need at least 5")
-            return
-
-        self.get_logger().info("")
-        self.get_logger().info("=" * 70)
-        self.get_logger().info(f"Computing calibration with {len(self.R_gripper2base_list)} samples...")
-        self.get_logger().info("=" * 70)
-
-        # 使用 OpenCV 的 calibrateHandEye
-        R_cam2gripper, t_cam2gripper = cv2.calibrateHandEye(
-            self.R_gripper2base_list,
-            self.t_gripper2base_list,
-            self.R_target2cam_list,
-            self.t_target2cam_list,
-            method=cv2.CALIB_HAND_EYE_TSAI
-        )
-
-        # 組成 4x4 轉換矩陣 (Camera → Flange)
-        T_cam2gripper = np.eye(4)
-        T_cam2gripper[:3, :3] = R_cam2gripper
-        T_cam2gripper[:3, 3] = t_cam2gripper.flatten()
-
-        # 計算 Flange → Camera（用於 URDF）
-        T_gripper2cam = self.invT(T_cam2gripper)
-
-        np.set_printoptions(suppress=True, precision=9)
-        
-        print("\n" + "="*70)
-        print("Calibration Result")
-        print("="*70)
-        print("\nT_flange2cam (Flange → Camera):")
-        print(T_gripper2cam)
-        
-        xyz = T_gripper2cam[:3, 3]
-        rpy = self.rot_to_rpy_xyz(T_gripper2cam[:3, :3])
-        
-        print("\n" + "="*70)
-        print("URDF <origin> tag:")
-        print("="*70)
-        print(f'<origin xyz="{xyz[0]:.9f} {xyz[1]:.9f} {xyz[2]:.9f}"')
-        print(f'        rpy="{rpy[0]:.9f} {rpy[1]:.9f} {rpy[2]:.9f}" />')
-        
-        print("\n" + "="*70)
-        print("Translation:")
-        print("="*70)
-        print(f"  X: {xyz[0]:+.6f} m ({xyz[0]*1000:+.2f} mm)")
-        print(f"  Y: {xyz[1]:+.6f} m ({xyz[1]*1000:+.2f} mm)")
-        print(f"  Z: {xyz[2]:+.6f} m ({xyz[2]*1000:+.2f} mm)")
-        print(f"  Distance: {np.linalg.norm(xyz):.3f} m ({np.linalg.norm(xyz)*1000:.1f} mm)")
-        
-        print("\n" + "="*70)
-        print("Rotation:")
-        print("="*70)
-        print(f"  Roll:  {math.degrees(rpy[0]):+.3f}°")
-        print(f"  Pitch: {math.degrees(rpy[1]):+.3f}°")
-        print(f"  Yaw:   {math.degrees(rpy[2]):+.3f}°")
-        print("="*70)
-        
-        # 保存
-        np.save("hand_eye_calibration.npy", T_gripper2cam)
-        print("\n✓ Saved to 'hand_eye_calibration.npy'")
-
-    @staticmethod
-    def invT(T: np.ndarray) -> np.ndarray:
-        R, t = T[:3, :3], T[:3, 3]
-        Ti = np.eye(4)
-        Ti[:3, :3] = R.T
-        Ti[:3, 3] = -R.T @ t
-        return Ti
-
-    @staticmethod
-    def rpy_to_rotation_matrix(rx, ry, rz):
-        """RPY 角度轉旋轉矩陣（單位：弧度）"""
-        Rx = np.array([
-            [1, 0, 0],
-            [0, np.cos(rx), -np.sin(rx)],
-            [0, np.sin(rx), np.cos(rx)]
-        ])
-        Ry = np.array([
-            [np.cos(ry), 0, np.sin(ry)],
-            [0, 1, 0],
-            [-np.sin(ry), 0, np.cos(ry)]
-        ])
-        Rz = np.array([
-            [np.cos(rz), -np.sin(rz), 0],
-            [np.sin(rz), np.cos(rz), 0],
-            [0, 0, 1]
-        ])
-        return Rz @ Ry @ Rx
-
-    @staticmethod
-    def rot_to_rpy_xyz(R: np.ndarray):
-        sy = math.sqrt(R[0,0]**2 + R[1,0]**2)
-        if sy < 1e-9:
-            roll  = math.atan2(-R[1,2], R[1,1])
-            pitch = math.atan2(-R[2,0], sy)
-            yaw = 0.0
-        else:
-            roll  = math.atan2(R[2,1], R[2,2])
-            pitch = math.atan2(-R[2,0], sy)
-            yaw   = math.atan2(R[1,0], R[0,0])
-        return np.array([roll, pitch, yaw], dtype=float)
-
-
-def main():
-    rclpy.init()
-    node = EyeInHandCalibration()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        cv2.destroyAllWindows()
-        node.destroy_node()
-        rclpy.shutdown()
-
-
-if __name__ == "__main__":
-    main()
-
 # #!/usr/bin/env python3
 # import rclpy
 # from rclpy.node import Node
@@ -555,13 +255,13 @@ if __name__ == "__main__":
 # from cv_bridge import CvBridge
 # import cv2
 # import numpy as np
-# import csv
 # from tm_msgs.msg import FeedbackState
 # from std_srvs.srv import Trigger
+# import math
 
-# class SimplifiedHandEyeCollector(Node):
+# class EyeInHandCalibration(Node):
 #     def __init__(self):
-#         super().__init__("simplified_handeye_collector")
+#         super().__init__("eye_in_hand_calibration")
 
 #         # Chessboard
 #         self.cols = 7
@@ -575,19 +275,15 @@ if __name__ == "__main__":
 #         self.latest_color = None
 
 #         # Robot state
-#         self.latest_robot_pose = None
+#         self.latest_robot_pose = None  # [X, Y, Z, Rx, Ry, Rz]
         
-#         # 儲存拍攝時的棋盤格角點相機座標
-#         self.camera_corners = None  # 63x3 array
-#         self.camera_captured = False
+#         # 數據存儲
+#         self.R_gripper2base_list = []  # Flange → Base 的旋轉
+#         self.t_gripper2base_list = []  # Flange → Base 的平移
+#         self.R_target2cam_list = []    # 棋盤格 → 相機的旋轉
+#         self.t_target2cam_list = []    # 棋盤格 → 相機的平移
         
-#         # CSV 輸出
-#         self.csv_path = "handeye_simple_calibration.csv"
-#         with open(self.csv_path, "w", newline="") as f:
-#             writer = csv.writer(f)
-#             writer.writerow(["corner_id", "Xc", "Yc", "Zc", "Xr", "Yr", "Zr"])
-        
-#         self.touch_count = 0
+#         self.sample_id = 0
 
 #         # Subscribers
 #         self.create_subscription(
@@ -601,29 +297,30 @@ if __name__ == "__main__":
 #         )
 
 #         # Services
-#         self.create_service(Trigger, 'capture_camera', self.srv_capture_camera)
-#         self.create_service(Trigger, 'record_touch', self.srv_record_touch)
+#         self.create_service(Trigger, 'capture_pose', self.srv_capture_pose)
 
 #         cv2.namedWindow("camera_view", cv2.WINDOW_NORMAL)
 
-#         self.get_logger().info("=== Simplified Hand-Eye Calibration ===")
-#         self.get_logger().info("Method: One-time capture + 63 touch points")
-#         self.get_logger().info("")
+#         self.get_logger().info("=" * 70)
+#         self.get_logger().info("Eye-in-Hand Calibration (Standard Method)")
+#         self.get_logger().info("=" * 70)
 #         self.get_logger().info("Setup:")
-#         self.get_logger().info("  1. FIXED chessboard on table")
-#         self.get_logger().info("  2. Camera on robot arm")
+#         self.get_logger().info("  - Camera mounted on robot arm (flange)")
+#         self.get_logger().info("  - Chessboard FIXED on table")
+#         self.get_logger().info("  - NO touching required!")
 #         self.get_logger().info("")
-#         self.get_logger().info("Workflow:")
-#         self.get_logger().info("  Step 1: Position robot to see chessboard")
-#         self.get_logger().info("  Step 2: Press SPACE to capture all 63 corners")
-#         self.get_logger().info("  Step 3: Touch each corner (0-62) with TCP")
-#         self.get_logger().info("  Step 4: Press 'r' after each touch")
-#         self.get_logger().info("  Step 5: Repeat until all 63 corners touched")
+#         self.get_logger().info("Instructions:")
+#         self.get_logger().info("  1. Fix chessboard on table (DO NOT MOVE IT)")
+#         self.get_logger().info("  2. Move robot to different positions/angles")
+#         self.get_logger().info("  3. Press SPACE to capture each pose")
+#         self.get_logger().info("  4. Collect 20-30 samples")
+#         self.get_logger().info("  5. Press 'q' to compute calibration")
 #         self.get_logger().info("")
-#         self.get_logger().info("Controls:")
-#         self.get_logger().info("  SPACE: Capture camera coordinates")
-#         self.get_logger().info("  r: Record current TCP position")
-#         self.get_logger().info("  q: Quit")
+#         self.get_logger().info("Tips:")
+#         self.get_logger().info("  - Vary X, Y, Z positions")
+#         self.get_logger().info("  - Vary Rx, Ry, Rz angles")
+#         self.get_logger().info("  - Keep chessboard fully visible")
+#         self.get_logger().info("=" * 70)
 #         self.get_logger().info("")
 
 #     def cb_info(self, msg):
@@ -633,28 +330,21 @@ if __name__ == "__main__":
 #             self.get_logger().info("✓ Camera intrinsics loaded")
 
 #     def cb_feedback(self, msg: FeedbackState):
-#         self.latest_robot_pose = msg.tool_pose
+#         # 使用 tool0_pose（= flange）
+#         self.latest_robot_pose = msg.tool0_pose  # [X, Y, Z, Rx, Ry, Rz]
 
 #     def cb_color(self, msg):
 #         self.latest_color = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         
 #         display_img = self.latest_color.copy()
         
-#         # 顯示狀態
-#         if not self.camera_captured:
-#             text = "Step 1: Press SPACE to capture corners"
-#             color = (0, 255, 0)
-#         else:
-#             text = f"Step 2: Touch corner #{self.touch_count}, press 'r'"
-#             color = (0, 0, 255)
-        
-#         cv2.putText(display_img, text, (10, 30), 
-#                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-#         cv2.putText(display_img, f"Touched: {self.touch_count}/63", (10, 70),
+#         cv2.putText(display_img, "Press SPACE to capture pose", (10, 30), 
+#                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+#         cv2.putText(display_img, f"Samples: {self.sample_id}/20-30", (10, 70),
 #                     cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
         
 #         if self.latest_robot_pose is not None:
-#             robot_text = f"TCP: X={self.latest_robot_pose[0]:.3f} Y={self.latest_robot_pose[1]:.3f} Z={self.latest_robot_pose[2]:.3f}"
+#             robot_text = f"Flange: X={self.latest_robot_pose[0]:.3f} Y={self.latest_robot_pose[1]:.3f} Z={self.latest_robot_pose[2]:.3f}"
 #             cv2.putText(display_img, robot_text, (10, 110),
 #                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
         
@@ -663,35 +353,28 @@ if __name__ == "__main__":
 #         key = cv2.waitKey(10) & 0xFF
 
 #         if key == ord(' '):
-#             self.capture_camera_coordinates()
-#         elif key == ord('r'):
-#             self.record_touch_position()
+#             self.capture_pose()
 #         elif key == ord('q'):
-#             self.get_logger().info("Exiting...")
-#             self.get_logger().info(f"Total touches recorded: {self.touch_count}/63")
+#             self.finish_calibration()
 #             rclpy.shutdown()
 
-#     def srv_capture_camera(self, request, response):
-#         success = self.capture_camera_coordinates()
+#     def srv_capture_pose(self, request, response):
+#         success = self.capture_pose()
 #         response.success = success
+#         response.message = f"Sample {self.sample_id-1} captured" if success else "Failed"
 #         return response
 
-#     def srv_record_touch(self, request, response):
-#         success = self.record_touch_position()
-#         response.success = success
-#         return response
-
-#     def capture_camera_coordinates(self):
-#         """步驟 1：拍攝並計算所有 63 個角點的相機座標"""
+#     def capture_pose(self):
+#         """捕捉一組位姿數據（不需要觸碰）"""
 #         if self.latest_color is None or self.camera_matrix is None:
 #             self.get_logger().warn("Camera not ready")
 #             return False
 
-#         if self.camera_captured:
-#             self.get_logger().warn("Already captured! Starting new calibration...")
-#             self.camera_captured = False
-#             self.touch_count = 0
+#         if self.latest_robot_pose is None:
+#             self.get_logger().warn("Robot feedback not ready")
+#             return False
 
+#         # 檢測棋盤格
 #         gray = cv2.cvtColor(self.latest_color, cv2.COLOR_BGR2GRAY)
 #         found, corners = cv2.findChessboardCornersSB(
 #             gray, (self.cols, self.rows),
@@ -702,12 +385,12 @@ if __name__ == "__main__":
 #             self.get_logger().warn("⚠ Chessboard NOT found!")
 #             return False
 
-#         # 建立 3D 模型
+#         # 建立 3D 棋盤格模型
 #         objp = np.zeros((self.cols * self.rows, 3), np.float32)
 #         objp[:, :2] = np.mgrid[0:self.cols, 0:self.rows].T.reshape(-1, 2)
 #         objp *= self.square_size
 
-#         # PnP：計算所有角點在相機座標系的位置
+#         # PnP：計算棋盤格相對相機的位姿
 #         ok, rvec, tvec = cv2.solvePnP(
 #             objp, corners, self.camera_matrix, self.dist_coeffs
 #         )
@@ -715,96 +398,143 @@ if __name__ == "__main__":
 #             self.get_logger().warn("⚠ PnP failed!")
 #             return False
 
-#         R, _ = cv2.Rodrigues(rvec)
-#         t = tvec.reshape(3, 1)
+#         R_target2cam, _ = cv2.Rodrigues(rvec)
+#         t_target2cam = tvec.reshape(3, 1)
 
-#         # 計算所有 63 個角點的相機座標
-#         self.camera_corners = []
-#         for i in range(len(objp)):
-#             p_obj = objp[i].reshape(3, 1)
-#             p_cam = R @ p_obj + t
-#             self.camera_corners.append(p_cam.flatten())
-        
-#         self.camera_corners = np.array(self.camera_corners)  # 63x3
-#         self.camera_captured = True
+#         # 從 robot feedback 取得 Flange 位姿
+#         X, Y, Z, Rx, Ry, Rz = self.latest_robot_pose
 
-#         # 視覺化：標註所有角點
+#         # 將 RPY 轉換為旋轉矩陣
+#         R_gripper2base = self.rpy_to_rotation_matrix(Rx, Ry, Rz)
+#         t_gripper2base = np.array([[X], [Y], [Z]])
+
+#         # 儲存數據
+#         self.R_gripper2base_list.append(R_gripper2base)
+#         self.t_gripper2base_list.append(t_gripper2base)
+#         self.R_target2cam_list.append(R_target2cam)
+#         self.t_target2cam_list.append(t_target2cam)
+
+#         # 視覺化
 #         img_show = self.latest_color.copy()
 #         cv2.drawChessboardCorners(img_show, (self.cols, self.rows), corners, True)
-        
-#         # 標註角點編號
-#         for i, corner in enumerate(corners):
-#             px, py = corner.ravel()
-#             px, py = int(px), int(py)
-#             cv2.putText(img_show, str(i), (px+5, py), 
-#                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-        
-#         # 高亮下一個要觸碰的角點
-#         if self.touch_count < len(corners):
-#             next_corner = corners[self.touch_count].ravel()
-#             px, py = int(next_corner[0]), int(next_corner[1])
-#             cv2.circle(img_show, (px, py), 15, (0, 0, 255), 3)
-        
 #         cv2.imshow("camera_view", img_show)
-#         cv2.waitKey(3000)
+#         cv2.waitKey(1000)
 
-#         self.get_logger().info(f"✓ Captured all 63 corners in camera frame")
-#         self.get_logger().info(f"Now touch corner #0 (top-left) and press 'r'")
-#         self.get_logger().info("")
+#         self.get_logger().info(f"✓ Sample #{self.sample_id} captured")
+#         self.sample_id += 1
         
 #         return True
 
-#     def record_touch_position(self):
-#         """步驟 2：記錄 TCP 觸碰位置"""
-#         if not self.camera_captured:
-#             self.get_logger().warn("⚠ Capture camera coordinates first! (Press SPACE)")
-#             return False
+#     def finish_calibration(self):
+#         """計算手眼標定"""
+#         if len(self.R_gripper2base_list) < 5:
+#             self.get_logger().error(f"Not enough samples! Got {len(self.R_gripper2base_list)}, need at least 5")
+#             return
 
-#         if self.touch_count >= 63:
-#             self.get_logger().warn("⚠ All 63 corners already recorded!")
-#             return False
+#         self.get_logger().info("")
+#         self.get_logger().info("=" * 70)
+#         self.get_logger().info(f"Computing calibration with {len(self.R_gripper2base_list)} samples...")
+#         self.get_logger().info("=" * 70)
 
-#         if self.latest_robot_pose is None:
-#             self.get_logger().error("⚠ No robot feedback!")
-#             return False
+#         # 使用 OpenCV 的 calibrateHandEye
+#         R_cam2gripper, t_cam2gripper = cv2.calibrateHandEye(
+#             self.R_gripper2base_list,
+#             self.t_gripper2base_list,
+#             self.R_target2cam_list,
+#             self.t_target2cam_list,
+#             method=cv2.CALIB_HAND_EYE_TSAI
+#         )
 
-#         # 當前觸碰的角點編號
-#         corner_id = self.touch_count
+#         # 組成 4x4 轉換矩陣 (Camera → Flange)
+#         T_cam2gripper = np.eye(4)
+#         T_cam2gripper[:3, :3] = R_cam2gripper
+#         T_cam2gripper[:3, 3] = t_cam2gripper.flatten()
+
+#         # 計算 Flange → Camera（用於 URDF）
+#         T_gripper2cam = self.invT(T_cam2gripper)
+
+#         np.set_printoptions(suppress=True, precision=9)
         
-#         # 相機座標（之前拍攝時計算的）
-#         Xc, Yc, Zc = self.camera_corners[corner_id]
+#         print("\n" + "="*70)
+#         print("Calibration Result")
+#         print("="*70)
+#         print("\nT_flange2cam (Flange → Camera):")
+#         print(T_gripper2cam)
         
-#         # Robot 座標（當前 TCP 位置）
-#         Xr, Yr, Zr = self.latest_robot_pose[:3]
-
-#         # 寫入 CSV
-#         with open(self.csv_path, "a", newline="") as f:
-#             writer = csv.writer(f)
-#             writer.writerow([corner_id, Xc, Yc, Zc, Xr, Yr, Zr])
-
-#         self.get_logger().info(f"✓ Corner #{corner_id} recorded")
-#         self.get_logger().info(f"  Camera: ({Xc:.4f}, {Yc:.4f}, {Zc:.4f})")
-#         self.get_logger().info(f"  Robot:  ({Xr:.4f}, {Yr:.4f}, {Zr:.4f})")
+#         xyz = T_gripper2cam[:3, 3]
+#         rpy = self.rot_to_rpy_xyz(T_gripper2cam[:3, :3])
         
-#         self.touch_count += 1
+#         print("\n" + "="*70)
+#         print("URDF <origin> tag:")
+#         print("="*70)
+#         print(f'<origin xyz="{xyz[0]:.9f} {xyz[1]:.9f} {xyz[2]:.9f}"')
+#         print(f'        rpy="{rpy[0]:.9f} {rpy[1]:.9f} {rpy[2]:.9f}" />')
+        
+#         print("\n" + "="*70)
+#         print("Translation:")
+#         print("="*70)
+#         print(f"  X: {xyz[0]:+.6f} m ({xyz[0]*1000:+.2f} mm)")
+#         print(f"  Y: {xyz[1]:+.6f} m ({xyz[1]*1000:+.2f} mm)")
+#         print(f"  Z: {xyz[2]:+.6f} m ({xyz[2]*1000:+.2f} mm)")
+#         print(f"  Distance: {np.linalg.norm(xyz):.3f} m ({np.linalg.norm(xyz)*1000:.1f} mm)")
+        
+#         print("\n" + "="*70)
+#         print("Rotation:")
+#         print("="*70)
+#         print(f"  Roll:  {math.degrees(rpy[0]):+.3f}°")
+#         print(f"  Pitch: {math.degrees(rpy[1]):+.3f}°")
+#         print(f"  Yaw:   {math.degrees(rpy[2]):+.3f}°")
+#         print("="*70)
+        
+#         # 保存
+#         np.save("hand_eye_calibration.npy", T_gripper2cam)
+#         print("\n✓ Saved to 'hand_eye_calibration.npy'")
 
-#         if self.touch_count < 63:
-#             self.get_logger().info(f"Next: Touch corner #{self.touch_count} and press 'r'")
+#     @staticmethod
+#     def invT(T: np.ndarray) -> np.ndarray:
+#         R, t = T[:3, :3], T[:3, 3]
+#         Ti = np.eye(4)
+#         Ti[:3, :3] = R.T
+#         Ti[:3, 3] = -R.T @ t
+#         return Ti
+
+#     @staticmethod
+#     def rpy_to_rotation_matrix(rx, ry, rz):
+#         """RPY 角度轉旋轉矩陣（單位：弧度）"""
+#         Rx = np.array([
+#             [1, 0, 0],
+#             [0, np.cos(rx), -np.sin(rx)],
+#             [0, np.sin(rx), np.cos(rx)]
+#         ])
+#         Ry = np.array([
+#             [np.cos(ry), 0, np.sin(ry)],
+#             [0, 1, 0],
+#             [-np.sin(ry), 0, np.cos(ry)]
+#         ])
+#         Rz = np.array([
+#             [np.cos(rz), -np.sin(rz), 0],
+#             [np.sin(rz), np.cos(rz), 0],
+#             [0, 0, 1]
+#         ])
+#         return Rz @ Ry @ Rx
+
+#     @staticmethod
+#     def rot_to_rpy_xyz(R: np.ndarray):
+#         sy = math.sqrt(R[0,0]**2 + R[1,0]**2)
+#         if sy < 1e-9:
+#             roll  = math.atan2(-R[1,2], R[1,1])
+#             pitch = math.atan2(-R[2,0], sy)
+#             yaw = 0.0
 #         else:
-#             self.get_logger().info("")
-#             self.get_logger().info("=" * 50)
-#             self.get_logger().info("✓ All 63 corners recorded!")
-#             self.get_logger().info(f"Data saved to: {self.csv_path}")
-#             self.get_logger().info("=" * 50)
-        
-#         self.get_logger().info("")
-        
-#         return True
+#             roll  = math.atan2(R[2,1], R[2,2])
+#             pitch = math.atan2(-R[2,0], sy)
+#             yaw   = math.atan2(R[1,0], R[0,0])
+#         return np.array([roll, pitch, yaw], dtype=float)
 
 
 # def main():
 #     rclpy.init()
-#     node = SimplifiedHandEyeCollector()
+#     node = EyeInHandCalibration()
 #     try:
 #         rclpy.spin(node)
 #     except KeyboardInterrupt:
@@ -817,6 +547,316 @@ if __name__ == "__main__":
 
 # if __name__ == "__main__":
 #     main()
+
+#!/usr/bin/env python3
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image, CameraInfo
+from cv_bridge import CvBridge
+import cv2
+import numpy as np
+import csv
+from tm_msgs.msg import FeedbackState
+from std_srvs.srv import Trigger
+
+class SimplifiedHandEyeCollector(Node):
+    def __init__(self):
+        super().__init__("simplified_handeye_collector")
+
+        # Chessboard
+        self.cols = 7
+        self.rows = 9
+        self.square_size = 0.010
+        
+        # Camera
+        self.camera_matrix = None
+        self.dist_coeffs = None
+        self.bridge = CvBridge()
+        self.latest_color = None
+
+        # Robot state
+        self.latest_robot_pose = None
+        
+        # 儲存拍攝時的棋盤格角點相機座標
+        self.camera_corners = None  # 63x3 array
+        self.camera_captured = False
+
+        self.base_tcp_pose_at_capture = None  # base→tcp at capture moment
+
+        
+        # CSV 輸出
+        self.csv_path = "handeye_simple_calibration.csv"
+        with open(self.csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            
+            writer.writerow([
+                "corner_id",
+                "Xc", "Yc", "Zc",
+                "Xr", "Yr", "Zr",
+                "tcp_cap_x", "tcp_cap_y", "tcp_cap_z",
+                "tcp_cap_rx", "tcp_cap_ry", "tcp_cap_rz"
+            ])
+
+
+        
+        # 只需要觸碰四個角點
+        self.required_corner_ids = [0, 6, 21, 27, 56, 62]  # 四個角
+        self.touch_step = 0  # 當前要觸碰第幾個
+
+
+        # Subscribers
+        self.create_subscription(
+            CameraInfo, "/camera/camera/color/camera_info", self.cb_info, 10
+        )
+        self.create_subscription(
+            Image, "/camera/camera/color/image_raw", self.cb_color, 10
+        )
+        self.create_subscription(
+            FeedbackState, "/feedback_states", self.cb_feedback, 10
+        )
+
+        # Services
+        self.create_service(Trigger, 'capture_camera', self.srv_capture_camera)
+        self.create_service(Trigger, 'record_touch', self.srv_record_touch)
+
+        cv2.namedWindow("camera_view", cv2.WINDOW_NORMAL)
+
+        self.get_logger().info("=== Simplified Hand-Eye Calibration ===")
+        self.get_logger().info("Method: One-time capture + 63 touch points")
+        self.get_logger().info("")
+        self.get_logger().info("Setup:")
+        self.get_logger().info("  1. FIXED chessboard on table")
+        self.get_logger().info("  2. Camera on robot arm")
+        self.get_logger().info("")
+        self.get_logger().info("Workflow:")
+        self.get_logger().info("  Step 1: Position robot to see chessboard")
+        self.get_logger().info("  Step 2: Press SPACE to capture all 63 corners")
+        self.get_logger().info("  Step 3: Touch each corner (0-62) with TCP")
+        self.get_logger().info("  Step 4: Press 'r' after each touch")
+        self.get_logger().info("  Step 5: Repeat until all 63 corners touched")
+        self.get_logger().info("")
+        self.get_logger().info("Controls:")
+        self.get_logger().info("  SPACE: Capture camera coordinates")
+        self.get_logger().info("  r: Record current TCP position")
+        self.get_logger().info("  q: Quit")
+        self.get_logger().info("")
+
+    def cb_info(self, msg):
+        if self.camera_matrix is None:
+            self.camera_matrix = np.array(msg.k).reshape(3, 3)
+            self.dist_coeffs = np.array(msg.d)
+            self.get_logger().info("✓ Camera intrinsics loaded")
+
+    def cb_feedback(self, msg: FeedbackState):
+        self.latest_robot_pose = msg.tool_pose
+
+    def cb_color(self, msg):
+        self.latest_color = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        
+        display_img = self.latest_color.copy()
+        
+        # 顯示狀態
+        if not self.camera_captured:
+            text = "Step 1: Press SPACE to capture corners"
+            color = (0, 255, 0)
+        else:
+            if self.touch_step < len(self.required_corner_ids):
+                target_corner = self.required_corner_ids[self.touch_step]
+            else:
+                target_corner = None
+
+        
+
+
+        cv2.putText(display_img,
+                    f"Touched: {self.touch_step}/{len(self.required_corner_ids)}",
+                    (10, 70),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
+
+        
+        if self.latest_robot_pose is not None:
+            robot_text = f"TCP: X={self.latest_robot_pose[0]:.3f} Y={self.latest_robot_pose[1]:.3f} Z={self.latest_robot_pose[2]:.3f}"
+            cv2.putText(display_img, robot_text, (10, 110),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        
+        cv2.imshow("camera_view", display_img)
+        
+        key = cv2.waitKey(10) & 0xFF
+
+        if key == ord(' '):
+            self.capture_camera_coordinates()
+        elif key == ord('r'):
+            self.record_touch_position()
+        elif key == ord('q'):
+            self.get_logger().info("Exiting...")
+            self.get_logger().info(f"Total touches recorded: {self.touch_count}/63")
+            rclpy.shutdown()
+
+    def srv_capture_camera(self, request, response):
+        success = self.capture_camera_coordinates()
+        response.success = success
+        return response
+
+    def srv_record_touch(self, request, response):
+        success = self.record_touch_position()
+        response.success = success
+        return response
+
+    def capture_camera_coordinates(self):
+        """步驟 1：拍攝並計算所有 63 個角點的相機座標"""
+        if self.latest_color is None or self.camera_matrix is None:
+            self.get_logger().warn("Camera not ready")
+            return False
+
+        # 高亮下一個要觸碰的角點
+        if self.camera_captured and self.touch_step < len(self.required_corner_ids):
+            next_corner_id = self.required_corner_ids[self.touch_step]
+            px, py = map(int, corners[next_corner_id].ravel())
+            cv2.circle(img_show, (px, py), 20, (0, 0, 255), 3)
+
+
+
+        gray = cv2.cvtColor(self.latest_color, cv2.COLOR_BGR2GRAY)
+        found, corners = cv2.findChessboardCornersSB(
+            gray, (self.cols, self.rows),
+            flags=cv2.CALIB_CB_EXHAUSTIVE + cv2.CALIB_CB_ACCURACY
+        )
+
+        if not found:
+            self.get_logger().warn("⚠ Chessboard NOT found!")
+            return False
+
+        # 建立 3D 模型
+        objp = np.zeros((self.cols * self.rows, 3), np.float32)
+        objp[:, :2] = np.mgrid[0:self.cols, 0:self.rows].T.reshape(-1, 2)
+        objp *= self.square_size
+
+        # PnP：計算所有角點在相機座標系的位置
+        ok, rvec, tvec = cv2.solvePnP(
+            objp, corners, self.camera_matrix, self.dist_coeffs
+        )
+        if not ok:
+            self.get_logger().warn("⚠ PnP failed!")
+            return False
+
+        R, _ = cv2.Rodrigues(rvec)
+        t = tvec.reshape(3, 1)
+
+        # 計算所有 63 個角點的相機座標
+        self.camera_corners = []
+        for i in range(len(objp)):
+            p_obj = objp[i].reshape(3, 1)
+            p_cam = R @ p_obj + t
+            self.camera_corners.append(p_cam.flatten())
+        
+        self.camera_corners = np.array(self.camera_corners)
+        self.camera_captured = True
+
+        # ★★★★★ 同步記錄 Base→TCP 拍照姿勢 ★★★★★
+        if self.latest_robot_pose is None:
+            self.get_logger().error("No robot pose! Cannot save capture pose.")
+            return False
+
+        self.base_tcp_pose_at_capture = np.array(self.latest_robot_pose[:6], dtype=float)
+
+        self.get_logger().info(f"✓ Saved TCP pose at capture: {self.base_tcp_pose_at_capture}")
+
+
+        # 視覺化：標註所有角點
+        img_show = self.latest_color.copy()
+        cv2.drawChessboardCorners(img_show, (self.cols, self.rows), corners, True)
+        
+        # 標註角點編號
+        for i, corner in enumerate(corners):
+            px, py = corner.ravel()
+            px, py = int(px), int(py)
+            cv2.putText(img_show, str(i), (px+5, py), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+        
+        # 高亮下一個要觸碰的角點
+        if self.camera_captured and self.touch_step < len(self.required_corner_ids):
+            target_corner_id = self.required_corner_ids[self.touch_step]
+            px, py = map(int, corners[target_corner_id].ravel())
+            cv2.circle(img_show, (px, py), 20, (0, 0, 255), 3)
+
+        
+        cv2.imshow("camera_view", img_show)
+        cv2.waitKey(3000)
+
+        self.get_logger().info(f"✓ Captured all 63 corners in camera frame")
+        self.get_logger().info(f"Now touch corner #0 (top-left) and press 'r'")
+        self.get_logger().info("")
+        
+        return True
+
+    def record_touch_position(self):
+        if not self.camera_captured:
+            self.get_logger().warn("⚠ Capture camera coordinates first! (Press SPACE)")
+            return False
+
+        if self.touch_step >= len(self.required_corner_ids):
+            self.get_logger().warn("⚠ All required corners already recorded!")
+            return False
+
+        if self.latest_robot_pose is None:
+            self.get_logger().error("⚠ No robot feedback!")
+            return False
+
+        # 目前要觸碰的角點 ID
+        corner_id = self.required_corner_ids[self.touch_step]
+
+        # 相機座標
+        Xc, Yc, Zc = self.camera_corners[corner_id]
+
+        # 機器人 TCP 座標
+        Xr, Yr, Zr = self.latest_robot_pose[:3]
+
+        # 寫入 CSV
+        with open(self.csv_path, "a", newline="") as f:
+            writer = csv.writer(f)
+            # unpack capture pose
+            tcp_cap_x, tcp_cap_y, tcp_cap_z, tcp_cap_rx, tcp_cap_ry, tcp_cap_rz = self.base_tcp_pose_at_capture
+
+            writer.writerow([
+                corner_id, Xc, Yc, Zc, Xr, Yr, Zr,
+                tcp_cap_x, tcp_cap_y, tcp_cap_z,
+                tcp_cap_rx, tcp_cap_ry, tcp_cap_rz
+            ])
+
+        self.get_logger().info(f"✓ Corner #{corner_id} recorded")
+        self.get_logger().info(f"  Camera: ({Xc:.4f}, {Yc:.4f}, {Zc:.4f})")
+        self.get_logger().info(f"  Robot:  ({Xr:.4f}, {Yr:.4f}, {Zr:.4f})")
+
+        self.touch_step += 1
+
+        if self.touch_step < len(self.required_corner_ids):
+            next_id = self.required_corner_ids[self.touch_step]
+            self.get_logger().info(f"Next: Touch corner #{next_id} and press 'r'")
+        else:
+            self.get_logger().info("")
+            self.get_logger().info("=" * 50)
+            self.get_logger().info("✓ All required corners recorded!")
+            self.get_logger().info(f"Data saved to: {self.csv_path}")
+            self.get_logger().info("=" * 50)
+
+        return True
+
+
+def main():
+    rclpy.init()
+    node = SimplifiedHandEyeCollector()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        cv2.destroyAllWindows()
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()
 
 # #!/usr/bin/env python3
 # import rclpy
