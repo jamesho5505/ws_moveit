@@ -1,3 +1,22 @@
+# import pandas as pd
+# import numpy as np
+
+# # 讀取檔案
+# df = pd.read_csv('verification_with_matrix_kw_tcp2.csv')
+
+# # 計算各軸的 RMSE
+# rmse_x = np.sqrt(np.mean(df['error_x']**2))
+# rmse_y = np.sqrt(np.mean(df['error_y']**2))
+# rmse_z = np.sqrt(np.mean(df['error_z']**2))
+
+# # 計算總體距離誤差的 RMSE (單位：mm)
+# rmse_total = np.sqrt(np.mean(df['error_mm']**2))
+
+# print(f"X軸 RMSE: {rmse_x*1000:.5f} mm")
+# print(f"Y軸 RMSE: {rmse_y*1000:.5f} mm")
+# print(f"Z軸 RMSE: {rmse_z*1000:.5f} mm")
+# print(f"RMSE(2D): {np.sqrt(rmse_x**2 + rmse_y**2)*1000:.5f} mm")
+# print(f"總體 RMSE (mm): {rmse_total:.5f} mm")
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
@@ -26,13 +45,27 @@ class SimpleCalibrationVerifier(Node):
         #     [ 0.,          0.,          0.,          1.,        ]
         # ])
 
+        # self.T_flange_camera_optical= np.array([
+        #     [-0.99942486,  0.03322565,  0.00678327,  0.03121642],
+        #     [-0.03325844, -0.99943536, -0.00477955, -0.08367524],
+        #     [ 0.00662064, -0.00500241,  0.99996557,  0.0654927 ],
+        #     [ 0.,          0.,          0.,          1.]
+        # ])
+        
+        # self.T_flange_camera_optical= np.array([
+        #     [-0.99925795,  0.03669493,  0.01170563,  0.03033158],
+        #     [-0.03659227, -0.99929094,  0.0088664 , -0.13727972],
+        #     [ 0.01202268,  0.00843148,  0.99989218,  0.09481419],
+        #     [ 0.        ,  0.        ,  0.        ,  1.        ]
+        # ])
+        
         self.T_flange_camera_optical= np.array([
-            [-0.99942486,  0.03322565,  0.00678327,  0.03121642],
-            [-0.03325844, -0.99943536, -0.00477955, -0.08367524],
-            [ 0.00662064, -0.00500241,  0.99996557,  0.0654927 ],
+            [-0.99926981,  0.03763377, -0.00659936,  0.0342429 ],
+            [-0.03773388, -0.99916346,  0.01576506, -0.08719725],
+            [-0.00600054,  0.01600256,  0.99985395,  0.06636586],
             [ 0.,          0.,          0.,          1.]
         ])
-        
+
         # Chessboard
         self.cols = 4
         self.rows = 4
@@ -62,7 +95,8 @@ class SimpleCalibrationVerifier(Node):
         self.verification_data = []
         
         # 要驗證的角點
-        self.corner_ids_to_verify = [0, 3, 12, 15]
+        # self.corner_ids_to_verify = [0, 3, 12, 15]
+        self.corner_ids_to_verify = [6, 7, 10, 11]
         
         # Subscribers
         self.create_subscription(

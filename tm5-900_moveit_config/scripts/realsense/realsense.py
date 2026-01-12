@@ -53,10 +53,57 @@ def capture_realsense_and_binarize():
             #     cv2.THRESH_BINARY + cv2.THRESH_OTSU
             # )
 
+            # === 尋找邊緣 ===
+
+            blurred_image = cv2.GaussianBlur(
+                grayscale_image,
+                ksize=(5, 5),   # 可試 (7,7)
+                sigmaX=1.5
+            )
+
+            clahe = cv2.createCLAHE(
+                clipLimit=2.0,
+                tileGridSize=(8, 8)
+            )
+            contrast_image = clahe.apply(blurred_image)
+
+            canny_image = cv2.Canny(
+                contrast_image,
+                threshold1=50,
+                threshold2=150
+            )
+
+            # kernel_for_dilation = np.ones((3, 3), np.uint8)
+            # canny_image = cv2.dilate(
+            #     canny_image,
+            #     kernel_for_dilation,
+            #     iterations=6
+            # )
+
+            contours, hierarchy = cv2.findContours(
+                canny_image,
+                cv2.RETR_TREE,
+                cv2.CHAIN_APPROX_SIMPLE
+            )
+
+            # contours, hierarchy = cv2.findContours(
+            #     canny_image,
+            #     cv2.RETR_EXTERNAL,
+            #     cv2.CHAIN_APPROX_NONE
+            # )
+
+            drawing = np.zeros((canny_image.shape[0], canny_image.shape[1], 3), dtype=np.uint8)
+            for i in range(len(contours)):
+                color = (255, 255, 255)
+                cv2.drawContours(drawing, contours, i, color, 2, cv2.LINE_8, hierarchy, 0)
+
+
 
             cv2.imshow("Color Image", color_image)
             cv2.imshow("Grayscale Image", grayscale_image)
             cv2.imshow("Binary Image (Otsu)", binary_image)
+            cv2.imshow("Contours", drawing)
+
 
             key_pressed = cv2.waitKey(1) & 0xFF
 
@@ -64,6 +111,8 @@ def capture_realsense_and_binarize():
                 cv2.imwrite("realsense_color.jpg", color_image)
                 cv2.imwrite("realsense_grayscale.jpg", grayscale_image)
                 cv2.imwrite("realsense_binary_otsu.jpg", binary_image)
+                cv2.imwrite("realsense_contours.jpg", drawing)
+                print("已儲存影像檔案")
 
             elif key_pressed == ord('q'):
                 break

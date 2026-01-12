@@ -65,7 +65,8 @@ class HandEyeCalibrator(Node):
         self.P_chess_list = []  # 角點在棋盤座標系
         self.P_base_list = []   # 角點在 base 座標系
         
-        self.target_corner_ids = [0, 3, 12, 15]
+        # self.target_corner_ids = [0, 3, 12, 15]
+        self.target_corner_ids = [6, 7, 10, 11]
         self.pose_count = 0
         self.target_poses = len(self.target_corner_ids)
         
