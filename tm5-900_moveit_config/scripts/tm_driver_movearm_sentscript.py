@@ -12,13 +12,13 @@ class SinglePtpScriptNode(Node):
         self.get_logger().info("Waiting for /send_script service...")
         self.send_script_client.wait_for_service()
         self.get_logger().info("/send_script service ready")
-        x = -381.77
-        y = -310.27
-        z = 262.45
-        rx = -179.78
-        ry = -0.33
-        rz = -30.21
-        speed_rate = 100
+        x = 135.0
+        y = -424.0
+        z = 50.0
+        rx = 180.0
+        ry = 0.0
+        rz = 180.0
+        speed_rate = 1.0
         acc_time = 100
         blend_percentage = 70
         precise_positioning = "false"
