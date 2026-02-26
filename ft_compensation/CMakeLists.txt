@@ -11,6 +11,8 @@ find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2 REQUIRED)
+find_package(tm_msgs REQUIRED)
+
 
 add_executable(ft_compensation_node src/ft_compensation_node.cpp)
 ament_target_dependencies(ft_compensation_node
@@ -20,8 +22,22 @@ ament_target_dependencies(ft_compensation_node
   tf2
 )
 
+add_executable(tm_ft_compensation_node src/tm_ft_compensation_node.cpp)
+ament_target_dependencies(tm_ft_compensation_node
+  rclcpp
+  geometry_msgs
+  tf2_geometry_msgs
+  tf2
+  tm_msgs
+)
+
 install(TARGETS
   ft_compensation_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(TARGETS
+  tm_ft_compensation_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -71,6 +71,52 @@ private:
     std::vector<double> x_hist_, y_hist_;
 };
 
+// ================= Lead Filter Class =================
+class LeadFilter
+{
+public:
+    LeadFilter() = default;
+
+    void setup(double lead_time_constant,
+               double alpha,
+               double sample_rate_hz)
+    {
+        double sample_period = 1.0 / sample_rate_hz;
+        double K = 2.0 / sample_period;
+
+        double denominator = 1.0 + K * alpha * lead_time_constant;
+
+        coefficient_a0_ = (1.0 + K * lead_time_constant) / denominator;
+        coefficient_a1_ = (1.0 - K * lead_time_constant) / denominator;
+        coefficient_b1_ = (1.0 - K * alpha * lead_time_constant) / denominator;
+
+        previous_input_  = 0.0;
+        previous_output_ = 0.0;
+    }
+
+    double filter(double current_input)
+    {
+        double current_output =
+            coefficient_a0_ * current_input +
+            coefficient_a1_ * previous_input_ -
+            coefficient_b1_ * previous_output_;
+
+        previous_input_  = current_input;
+        previous_output_ = current_output;
+
+        return current_output;
+    }
+
+private:
+    double coefficient_a0_{0.0};
+    double coefficient_a1_{0.0};
+    double coefficient_b1_{0.0};
+
+    double previous_input_{0.0};
+    double previous_output_{0.0};
+};
+
+
 class FtCompNode : public rclcpp::Node
 {
 public:
@@ -90,6 +136,8 @@ public:
         // 濾波器參數
         int    filter_order   = declare_parameter<int>("filter_order", 2);
         double filter_cutoff  = declare_parameter<double>("filter_cutoff_hz", 2.0);
+        // double lead_time_constant = declare_parameter<double>("lead_T", 0.03);
+        // double lead_alpha         = declare_parameter<double>("lead_alpha", 0.2);
 
         // subscribers / publisher
         pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
@@ -108,6 +156,13 @@ public:
             filters_.emplace_back();
             filters_.back().setup(filter_order, filter_cutoff, sample_rate_hz_);
         }
+        // for (int i = 0; i < 6; ++i) {
+        //     filters_.emplace_back();
+        //     filters_.back().setup(
+        //         lead_time_constant,
+        //         lead_alpha,
+        //         sample_rate_hz_);
+        // }
 
         RCLCPP_INFO(get_logger(), "ft_compensation_node started.");
         RCLCPP_INFO(get_logger(), "data_number = %d, duration_per_pose = %.1f s, sample_rate = %.1f Hz",
@@ -752,6 +807,7 @@ private:
     std::string output_topic_;
 
     std::vector<ButterworthFilter> filters_;
+    // std::vector<LeadFilter> filters_;
 };
 
 int main(int argc, char **argv)
