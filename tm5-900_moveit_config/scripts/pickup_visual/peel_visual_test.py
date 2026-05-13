@@ -346,7 +346,7 @@ class HybridContourFollowingNode(Node):
 
         # ---------------- Trench detection ----------------
         self.trench_fz_threshold    = -3.10
-        self.trench_backoff_step_mm = 0.150
+        self.trench_backoff_step_mm = 0.1
         self.trench_traj_start = None
         self.trench_traj_time  = 0.0
         self.traj_end_z        = None
@@ -1266,7 +1266,7 @@ class HybridContourFollowingNode(Node):
             return 0.0
         if force_error < -0.4:
             return 0.4
-        return 0.6
+        return 1.0
     
     # def _traj_speed_scale(self, force_error: float) -> float:
     #     fe = abs(force_error)
@@ -1451,7 +1451,6 @@ class HybridContourFollowingNode(Node):
                                                    self.force_integral_limit))
 
             delta = (self.Kf * force_error
-                     + self.Df * force_error_dot
                      + self.force_integral)
             delta = float(np.clip(delta, -self.max_normal_step, self.max_normal_step))
             self.force_correction = -n_hat * delta
@@ -1523,13 +1522,15 @@ class HybridContourFollowingNode(Node):
                     )
 
                     self.send_script("PVTExit()")
-                    time.sleep(0.05)
+                    time.sleep(0.1)
+                    # self.send_script("StopAndClearBuffer()")
+                    # time.sleep(0.1)
                     self.send_script(backoff_target)
                     time.sleep(0.1)
                     self.send_script(line_script)
                     time.sleep(0.1)
                     self.send_script(leave_script)
-                    # self.timer.cancel()
+                    self.timer.cancel()
                     return
 
         elif self.phase == self.PHASE_TRENCH_TRAVERSE:
@@ -1771,6 +1772,9 @@ class HybridContourFollowingNode(Node):
         #         )
         # self.last_real_pvt_send_time = now
 
+        if self.phase in [self.PHASE_TRENCH_TRAVERSE, self.PHASE_DONE]:
+            return
+
         if self.current_pvt_target_error_mm() > 0.4:
             # self.get_logger().warn("Skip PVT: robot lag too large")
             return
@@ -1791,9 +1795,9 @@ class HybridContourFollowingNode(Node):
         self.remove_finished_futures()
 
         if len(self.pending_script_futures) >= 5: # 20
-            # self.get_logger().warn(
-            #     f'Skip SendScript: too many pending requests ({len(self.pending_script_futures)})'
-            # )
+            self.get_logger().warn(
+                f'Skip SendScript: too many pending requests ({len(self.pending_script_futures)})'
+            )
             return False
 
         self.script_sequence_number += 1
@@ -1824,13 +1828,13 @@ def parse_arguments():
     parser.add_argument('--model-path', default=DEFAULT_MODEL_PATH)
     parser.add_argument('--speed-override-ratio', type=float, default=0.05)
     parser.add_argument('--pvt-duration-sec', type=float, default=0.01)
-    parser.add_argument('--logic-rate-hz', type=float, default=100.0)
-    parser.add_argument('--fast-actual-approach-speed-mm-s', type=float, default=10.0)
-    parser.add_argument('--slow-actual-force-speed-mm-s', type=float, default=0.5)
-    parser.add_argument('--follow-actual-speed-mm-s', type=float, default=0.5)
-    parser.add_argument('--fast-max-command-lead-mm', type=float, default=2.5)
-    parser.add_argument('--slow-max-command-lead-mm', type=float, default=0.3)
-    parser.add_argument('--pvt-target-settle-error-mm', type=float, default=0.05)
+    parser.add_argument('--fast-actual-approach-speed-mm-s', type=float, default=1.0)
+    parser.add_argument('--slow-actual-force-speed-mm-s', type=float, default=1.0)
+    parser.add_argument('--follow-actual-speed-mm-s', type=float, default=0.4)
+    parser.add_argument('--fast-max-command-lead-mm', type=float, default=2.0)
+    parser.add_argument('--slow-max-command-lead-mm', type=float, default=0.15)
+    parser.add_argument('--pvt-target-settle-error-mm', type=float, default=0.15)
+    parser.add_argument('--logic-rate-hz', type=float, default=20.0)
     return parser.parse_args()
 
 
@@ -1855,25 +1859,36 @@ def main():
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().warn('KeyboardInterrupt: sending PVTExit before shutdown...')
+        print('KeyboardInterrupt: sending PVTExit before shutdown...')
         try:
-            node.send_script('PVTExit()')
-            node.send_script('StopAndClearBuffer(0)')
-        except Exception:
-            pass
+            if rclpy.ok():
+                node.send_script('PVTExit()')
+                node.send_script('StopAndClearBuffer(0)')
+                time.sleep(0.1)
+        except Exception as exc:
+            print(f'Shutdown command failed: {exc}')
+
     finally:
-        node.get_logger().info('Shutting down...')
+        print('Shutting down...')
         node._stop_event.set()
         node._force_thread.join(timeout=1.0)
+
         try:
             node.cam_stop()
         except Exception:
             pass
+
         try:
-            cv2.destroyAllWindows()
+            if SHOW_VISION_WINDOW:
+                cv2.destroyAllWindows()
         except Exception:
             pass
-        node.destroy_node()
+
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+
         if rclpy.ok():
             rclpy.shutdown()
 
