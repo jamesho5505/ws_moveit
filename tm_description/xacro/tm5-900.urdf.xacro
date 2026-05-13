@@ -9,13 +9,14 @@
   <xacro:include filename="$(find tm_description)/xacro/macro.gazebo.xacro" />
   <xacro:include filename="$(find tm_description)/xacro/macro.transmission.xacro" />
   <xacro:include filename="$(find tm_description)/xacro/macro.materials.xacro" />
+  <xacro:include filename="$(find tm_description)/xacro/camera_d435i.xacro" />
 
 
   <!-- tm5-900 -->
   <!-- If the user want to use newly generated named robot description file as user_defined.urdf.xacro, -->
   <!-- you must modify 'macro.tm5-900-nominal.urdf.xacro' to 'user_defined.urdf.xacro'  -->
   <xacro:include filename="$(find tm_description)/xacro/macro.tm5-900-nominal.urdf.xacro" />
-  <xacro:include filename="$(find realsense2_description)/urdf/_d435.urdf.xacro" />
+  <!-- <xacro:include filename="$(find realsense2_description)/urdf/_d435.urdf.xacro" /> -->
   <xacro:include filename="$(find robotiq_ft_sensor_description)/urdf/robotiq_ft300.urdf.xacro" />
   <xacro:include filename="$(find robotiq_ft_sensor_description)/urdf/robotiq_fts.ros2_control.xacro" />
   <xacro:include filename="$(find robotiq_description)/urdf/robotiq_2f_85_macro.urdf.xacro" />
@@ -23,22 +24,12 @@
 
 
   <!-- === 2. 掛 Realsense D435 === -->
-  <xacro:sensor_d435
-      parent="flange"
-      name="camera"
-      >
-      <!-- <origin xyz="0.025236 -0.098542 0.065030" rpy="0 0 0"/> -->
-      <!-- <origin xyz="0.025298 -0.085386 0.064383" rpy="3.004966 -1.567813 1.741474"/> -->
-      <!-- <origin xyz="0.029554 -0.080299 0.064266" rpy="-0.583386 -1.550046 -0.953128"/> --> <!-- 5x5 z=175--> 
-      <origin xyz="0.031216 -0.083675 0.065493" rpy="-0.923735 -1.562498 -0.613812"/> <!-- 5x5 z=140-->
-      <!-- <origin xyz="0.0 -0.0783 0.0157" rpy="0 ${-pi/2} ${-pi/2}"/>  -->
-      <!-- <origin xyz = "0.03416316  -0.08310092  0.06301802" rpy = "0 ${-pi/2} ${-pi/2} "/> -->
-      <!-- <origin xyz="0.034163 -0.083101 0.063018" rpy="-1.605088 -0.000718 1.603982"/> -->
-      <!-- <origin xyz="0.034163 -0.083101 0.063018" rpy="-2.340436 -1.523098 2.373241"/> -->
-      <!-- <origin xyz="0.022630 -0.085012 0.064067" rpy="-1.559194 0.006418 1.604998"/> -->
-      <!-- <origin xyz="0.022459 -0.085114 0.049068" rpy="1.559194 -0.006418 -1.536595"/> -->
-      <!-- <origin xyz="0.025236 -0.098542 0.065030" rpy="-1.565947 0.004636 1.612422"/> -->
-  </xacro:sensor_d435>
+  <!-- <xacro:sensor_d435 -->
+      <!-- parent="flange" -->
+      <!-- name="camera" -->
+      <!-- > -->
+      <!-- <origin xyz="0.017199 -0.087010 0.061819" rpy="2.9423 -1.5443 1.7723"/> -->
+  <!-- </xacro:sensor_d435> -->
 
   <!-- === 3. 掛 力覺感測器 (Force Torque Sensor) === -->
   <!-- Robotiq FT300 mounted at TM5 flange -->
@@ -65,7 +56,10 @@
      <child link="tcp"/>
      <!-- <origin xyz="-0.001814 0.032587 0.197883" rpy="-0.001885 0.000590 0.003866"/> -->
      <!-- <origin xyz="-0.0093 0.0315 0.1964" rpy="0 0 0"/> -->
-     <origin xyz="-0.0035 0.03106 0.19631" rpy="0 0 0"/>
+     <!-- <origin xyz="-0.0035 0.03106 0.19631" rpy="0 0 0"/> -->
+     <!-- <origin xyz="-0.0095 0.01961 0.28455" rpy="0 0 0"/> -->
+     <!-- <origin xyz="-0.01428 -0.000161 0.21794" rpy="0 0 0"/> -->
+     <origin xyz="-0.00314 0.01973 0.21463" rpy="0 0 0"/>
    </joint>
 
 
