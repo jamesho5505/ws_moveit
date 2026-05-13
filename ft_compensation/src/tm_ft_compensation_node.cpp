@@ -1,5 +1,6 @@
 #include <rclcpp/rclcpp.hpp>
-#include <tm_msgs/srv/set_positions.hpp>
+// #include <tm_msgs/srv/set_positions.hpp>
+#include "tm_msgs/srv/send_script.hpp"
 #include <geometry_msgs/msg/wrench_stamped.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 
@@ -24,45 +25,33 @@
 
 
 // ================= Butterworth Filter Class =================
-class ButterworthFilter
-{
+class ButterworthFilter {
 public:
     ButterworthFilter() = default;
-
-    void setup(int order, double cutoff_hz, double sample_rate_hz)
-    {
+    void setup(int order, double cutoff_hz, double sample_rate_hz) {
         order_ = order;
         double wc = std::tan(M_PI * cutoff_hz / sample_rate_hz);
         double k1 = 1.414213562; // sqrt(2)
-
-        if (order == 1)
-        {
+        if (order == 1) {
             double k = wc;
             a_coeffs_ = {1.0, (k - 1) / (k + 1)};
             b_coeffs_ = {k / (k + 1), k / (k + 1)};
-        }
-        else // 2nd order
-        {
+        } else { // 2nd order
             double k = wc / k1;
             double k_sq = k * k;
-            double den = k_sq + k1*k + 1;
-            a_coeffs_ = {1.0, 2 * (k_sq - 1) / den, (k_sq - k1*k + 1) / den};
+            double den = k_sq + k1 * k + 1;
+            a_coeffs_ = {1.0, 2 * (k_sq - 1) / den, (k_sq - k1 * k + 1) / den};
             b_coeffs_ = {k_sq / den, 2 * k_sq / den, k_sq / den};
         }
-
         x_hist_.assign(order_ + 1, 0.0);
         y_hist_.assign(order_ + 1, 0.0);
     }
-
-    double filter(double input)
-    {
-        // Shift history
+    double filter(double input) {
         for (int i = order_; i > 0; --i) {
-            x_hist_[i] = x_hist_[i-1];
-            y_hist_[i] = y_hist_[i-1];
+            x_hist_[i] = x_hist_[i - 1];
+            y_hist_[i] = y_hist_[i - 1];
         }
         x_hist_[0] = input;
-
         double output = 0.0;
         for (int i = 0; i <= order_; ++i) {
             output += b_coeffs_[i] * x_hist_[i];
@@ -71,7 +60,6 @@ public:
         y_hist_[0] = output;
         return output;
     }
-
 private:
     int order_{2};
     std::vector<double> a_coeffs_, b_coeffs_;
@@ -79,48 +67,25 @@ private:
 };
 
 // ================= Lead Filter Class =================
-class LeadFilter
-{
+class LeadFilter {
 public:
     LeadFilter() = default;
-
-    void setup(double lead_time_constant,
-               double alpha,
-               double sample_rate_hz)
-    {
-        double sample_period = 1.0 / sample_rate_hz;
-        double K = 2.0 / sample_period;
-
-        double denominator = 1.0 + K * alpha * lead_time_constant;
-
-        coefficient_a0_ = (1.0 + K * lead_time_constant) / denominator;
-        coefficient_a1_ = (1.0 - K * lead_time_constant) / denominator;
-        coefficient_b1_ = (1.0 - K * alpha * lead_time_constant) / denominator;
-
-        previous_input_  = 0.0;
-        previous_output_ = 0.0;
+    void setup(double lead_T, double alpha, double sample_rate_hz) {
+        double T_s = 1.0 / sample_rate_hz;
+        double K = 2.0 / T_s;
+        double den = (1.0 + K * alpha * lead_T);
+        a0_ = (1.0 + K * lead_T) / den;
+        a1_ = (1.0 - K * lead_T) / den;
+        b1_ = (1.0 - K * alpha * lead_T) / den;
+        prev_x_ = 0.0; prev_y_ = 0.0;
     }
-
-    double filter(double current_input)
-    {
-        double current_output =
-            coefficient_a0_ * current_input +
-            coefficient_a1_ * previous_input_ -
-            coefficient_b1_ * previous_output_;
-
-        previous_input_  = current_input;
-        previous_output_ = current_output;
-
-        return current_output;
+    double filter(double x) {
+        double y = a0_ * x + a1_ * prev_x_ - b1_ * prev_y_;
+        prev_x_ = x; prev_y_ = y;
+        return y;
     }
-
 private:
-    double coefficient_a0_{0.0};
-    double coefficient_a1_{0.0};
-    double coefficient_b1_{0.0};
-
-    double previous_input_{0.0};
-    double previous_output_{0.0};
+    double a0_{0.0}, a1_{0.0}, b1_{0.0}, prev_x_{0.0}, prev_y_{0.0};
 };
 
 
@@ -131,20 +96,20 @@ public:
     : Node("tm_ft_compensation_node")
     {
         // 互動式校正設定
-        data_number_       = declare_parameter<int>("data_number", 9);       // 姿態數量
+        data_number_       = declare_parameter<int>("data_number", 10);       // 姿態數量
         duration_per_pose_ = declare_parameter<double>("duration_per_pose", 5.0); // 每個姿態 CSV 蒐集時間 (s)
-        sample_rate_hz_    = declare_parameter<double>("sample_rate", 100.0);      // CSV 取樣率
+        sample_rate_hz_    = declare_parameter<double>("sample_rate", 66.70);      // CSV 取樣率
         tool_mass_guess_   = declare_parameter<double>("tool_mass_guess", 1.0547); // 舊程式裡用來算 Tool_Weight_Matrix 的 mass
 
         pose_topic_   = declare_parameter<std::string>("pose_topic", "/tool_pose");
         wrench_topic_ = declare_parameter<std::string>("wrench_topic", "/robotiq_force_torque_sensor_broadcaster/wrench");
         output_topic_ = declare_parameter<std::string>("output_topic", "/ft_compensated");
 
-        // 濾波器參數
-        int    filter_order   = declare_parameter<int>("filter_order", 2);
-        double filter_cutoff  = declare_parameter<double>("filter_cutoff_hz", 10.0);
-        // double lead_time_constant = declare_parameter<double>("lead_T", 0.03);
-        // double lead_alpha         = declare_parameter<double>("lead_alpha", 0.2);
+        // 濾波器參數調整：為了高速力控，截止頻率拉高，並加入相位補償
+        int bw_order = declare_parameter<int>("filter_order", 2);
+        double bw_cutoff = declare_parameter<double>("filter_cutoff_hz", 25.0); // 稍微放寬以減少延遲
+        double lead_T = declare_parameter<double>("lead_T", 0.035);            // 補償約 35ms 延遲
+        double lead_alpha = declare_parameter<double>("lead_alpha", 0.15);      // 值越小相位超前越多
 
         // subscribers / publisher
         pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
@@ -152,34 +117,34 @@ public:
             std::bind(&FtCompNode::poseCallback, this, std::placeholders::_1));
 
         wrench_sub_ = create_subscription<geometry_msgs::msg::WrenchStamped>(
-            wrench_topic_, 100,
+            wrench_topic_, 1,
             std::bind(&FtCompNode::wrenchCallback, this, std::placeholders::_1));
 
         wrench_pub_ = create_publisher<geometry_msgs::msg::WrenchStamped>(
             output_topic_, 100);
 
-        move_client_ = create_client<tm_msgs::srv::SetPositions>("set_positions");
+        // move_client_ = create_client<tm_msgs::srv::SetPositions>("set_positions");
+        script_client_ = create_client<tm_msgs::srv::SendScript>("send_script");
 
-        // 初始化 6 個濾波器
-        for(int i=0; i<6; ++i) {
-            filters_.emplace_back();
-            filters_.back().setup(filter_order, filter_cutoff, sample_rate_hz_);
+        // 初始化串聯濾波器：先 Butterworth 去噪，後 Lead Filter 補相位
+        for (int i = 0; i < 6; ++i) {
+            ButterworthFilter bw;
+            bw.setup(bw_order, bw_cutoff, sample_rate_hz_);
+            bw_filters_.push_back(bw);
+
+            LeadFilter lf;
+            lf.setup(lead_T, lead_alpha, sample_rate_hz_);
+            lead_filters_.push_back(lf);
         }
-        // for (int i = 0; i < 6; ++i) {
-        //     filters_.emplace_back();
-        //     filters_.back().setup(
-        //         lead_time_constant,
-        //         lead_alpha,
-        //         sample_rate_hz_);
-        // }
 
         RCLCPP_INFO(get_logger(), "ft_compensation_node started.");
         RCLCPP_INFO(get_logger(), "data_number = %d, duration_per_pose = %.1f s, sample_rate = %.1f Hz",
                     data_number_, duration_per_pose_, sample_rate_hz_);
         RCLCPP_INFO(get_logger(), "Butterworth filter: order=%d, cutoff=%.1f Hz",
-                    filter_order, filter_cutoff);
-        if (filter_order < 1 || filter_order > 2) {
-            RCLCPP_WARN(get_logger(), "Filter order %d is not supported, using order 2.", filter_order);
+                    bw_order, bw_cutoff);
+        RCLCPP_INFO(get_logger(), "Filter Optimized for High-Speed (66.7Hz Feedback). BW: %.1fHz, Lead_T: %.3fs", bw_cutoff, lead_T);
+        if (bw_order < 1 || bw_order > 2) {
+            RCLCPP_WARN(get_logger(), "Filter order %d is not supported, using order 2.", bw_order);
         }
 
     }
@@ -209,14 +174,6 @@ public:
             return M;
         };
 
-        // auto printMatrix = [](double **M, int row, int col) {
-        //     for (int i = 0; i < row; ++i) {
-        //         for (int j = 0; j < col; ++j) {
-        //             std::cout << M[i][j] << " ";
-        //         }
-        //         std::cout << std::endl;
-        //     }
-        // };
 
         auto trasposeMatrix = [&](double **M, double **MT, int row, int col) {
             for (int i = 0; i < col; ++i) {
@@ -340,8 +297,11 @@ public:
                 return;
             }
 
-            // 2. 等待機器人完全穩定 (沿用您現有的 waitForPoseStabilized)
-            waitForPoseStabilized();
+            // 2. 等待機器人到達目標姿態，且姿態穩定
+            if (!waitForTargetPoseReachedAndStable(calibration_poses[i])) {
+                RCLCPP_ERROR(get_logger(), "Pose %d did not reach target. Aborting.", i + 1);
+                return;
+            }
 
             // 3. 獲取當前數據 (原本的採集邏輯)
             rclcpp::spin_some(shared_from_this());
@@ -708,6 +668,15 @@ public:
             double Mez = mz - GravityXYZ_Matrix[1][0] * Gravity_center_x
                              - GravityXYZ_Matrix[0][0] * Gravity_center_y - mz_0;
 
+            double raw_data[6] = {Fex, Fey, Fez, Mex, Mey, Mez};
+            double filtered_data[6];
+
+            for (int i = 0; i < 6; ++i) {
+                // 串聯濾波：BW 濾波器先行，Lead 補償隨後
+                double step1 = bw_filters_[i].filter(raw_data[i]);
+                filtered_data[i] = lead_filters_[i].filter(step1);
+            }
+
             geometry_msgs::msg::WrenchStamped out;
             out.header.stamp    = now();
             out.header.frame_id = "robotiq_ft_frame_id"; // 可依實際情況修改
@@ -720,12 +689,19 @@ public:
             // out.wrench.torque.z = Mez;
 
             // 在發布前對補償後的結果進行濾波
-            out.wrench.force.x  = filters_[0].filter(Fex);
-            out.wrench.force.y  = filters_[1].filter(Fey);
-            out.wrench.force.z  = filters_[2].filter(Fez);
-            out.wrench.torque.x = filters_[3].filter(Mex);
-            out.wrench.torque.y = filters_[4].filter(Mey);
-            out.wrench.torque.z = filters_[5].filter(Mez);
+            // out.wrench.force.x  = filters_[0].filter(Fex);
+            // out.wrench.force.y  = filters_[1].filter(Fey);
+            // out.wrench.force.z  = filters_[2].filter(Fez);
+            // out.wrench.torque.x = filters_[3].filter(Mex);
+            // out.wrench.torque.y = filters_[4].filter(Mey);
+            // out.wrench.torque.z = filters_[5].filter(Mez);
+
+            out.wrench.force.x = filtered_data[0];
+            out.wrench.force.y = filtered_data[1];
+            out.wrench.force.z = filtered_data[2];
+            out.wrench.torque.x = filtered_data[3];
+            out.wrench.torque.y = filtered_data[4];
+            out.wrench.torque.z = filtered_data[5];
 
             wrench_pub_->publish(out);
             loop_rate.sleep();
@@ -742,8 +718,6 @@ private:
 
     void wrenchCallback(const geometry_msgs::msg::WrenchStamped::SharedPtr msg)
     {
-        // 如需與舊 ROS1 driver 軸向對齊，可在此做 swap/sign 調整
-        // 輸入的 topic 已經是濾波過的，直接使用
         fx_ = msg->wrench.force.x;
         fy_ = msg->wrench.force.y;
         fz_ = msg->wrench.force.z;
@@ -764,53 +738,162 @@ private:
         RCLCPP_INFO(get_logger(), "First pose & wrench received, start calibration.");
     }
 
-    void waitForPoseStabilized()
+    double normalizeAngleDifference(double angle)
     {
-        RCLCPP_INFO(get_logger(), "Waiting for robot pose to stabilize...");
+        while (angle > M_PI) {
+            angle -= 2.0 * M_PI;
+        }
+        while (angle < -M_PI) {
+            angle += 2.0 * M_PI;
+        }
+        return angle;
+    }
+
+    bool waitForTargetPoseReachedAndStable(const std::vector<double>& target_pose)
+    {
+        RCLCPP_INFO(get_logger(), "Waiting for robot to reach target pose and stabilize...");
 
         rclcpp::Rate rate(100.0);
 
-        geometry_msgs::msg::PoseStamped last_pose = current_pose_;
+        constexpr double target_position_threshold = 0.001;                 // 1 mm
+        constexpr double target_angle_threshold = 0.5 * M_PI / 180.0;        // 0.5 degree
+
+        constexpr double stable_position_threshold = 1e-4;                  // 0.1 mm
+        constexpr double stable_angle_threshold = 0.1 * M_PI / 180.0;        // 0.1 degree
+
+        constexpr int required_stable_cycles = 80;                          // 0.8 s at 100 Hz
+        constexpr double timeout_seconds = 30.0;
+
+        tf2::Quaternion target_quaternion;
+        target_quaternion.setRPY(target_pose[3], target_pose[4], target_pose[5]);
+        target_quaternion.normalize();
+
+        geometry_msgs::msg::PoseStamped previous_pose = current_pose_;
         int stable_counter = 0;
 
-        constexpr double position_threshold = 1e-4;  // 0.1 mm
-        constexpr double angle_threshold = 0.1 * M_PI / 180.0;  // 0.1 degree
-        constexpr int required_stable_cycles = 100;  // 約 1 秒（100 Hz）
+        rclcpp::Time start_time = now();
 
         while (rclcpp::ok())
         {
-            rclcpp::spin_some(shared_from_this());
+            rclcpp::spin_some(this->get_node_base_interface());
 
-            double dx = current_pose_.pose.position.x - last_pose.pose.position.x;
-            double dy = current_pose_.pose.position.y - last_pose.pose.position.y;
-            double dz = current_pose_.pose.position.z - last_pose.pose.position.z;
+            double elapsed_time = (now() - start_time).seconds();
+            if (elapsed_time > timeout_seconds) {
+                RCLCPP_WARN(get_logger(), "Timeout while waiting for target pose.");
+                return false;
+            }
 
-            double position_delta = std::sqrt(dx*dx + dy*dy + dz*dz);
-            tf2::Quaternion q_now, q_last;
-            tf2::fromMsg(current_pose_.pose.orientation, q_now);
-            tf2::fromMsg(last_pose.pose.orientation, q_last);
+            double target_position_error_x = current_pose_.pose.position.x - target_pose[0];
+            double target_position_error_y = current_pose_.pose.position.y - target_pose[1];
+            double target_position_error_z = current_pose_.pose.position.z - target_pose[2];
 
-            double angle_delta = q_now.angleShortestPath(q_last);
+            double target_position_error = std::sqrt(
+                target_position_error_x * target_position_error_x +
+                target_position_error_y * target_position_error_y +
+                target_position_error_z * target_position_error_z
+            );
 
-            if (position_delta < position_threshold && angle_delta < angle_threshold) {
+            tf2::Quaternion current_quaternion;
+            tf2::fromMsg(current_pose_.pose.orientation, current_quaternion);
+            current_quaternion.normalize();
+
+            double target_angle_error = current_quaternion.angleShortestPath(target_quaternion);
+
+            double pose_delta_x = current_pose_.pose.position.x - previous_pose.pose.position.x;
+            double pose_delta_y = current_pose_.pose.position.y - previous_pose.pose.position.y;
+            double pose_delta_z = current_pose_.pose.position.z - previous_pose.pose.position.z;
+
+            double position_delta = std::sqrt(
+                pose_delta_x * pose_delta_x +
+                pose_delta_y * pose_delta_y +
+                pose_delta_z * pose_delta_z
+            );
+
+            tf2::Quaternion previous_quaternion;
+            tf2::fromMsg(previous_pose.pose.orientation, previous_quaternion);
+            previous_quaternion.normalize();
+
+            double angle_delta = current_quaternion.angleShortestPath(previous_quaternion);
+
+            bool target_pose_reached =
+                target_position_error < target_position_threshold &&
+                target_angle_error < target_angle_threshold;
+
+            bool pose_is_stable =
+                position_delta < stable_position_threshold &&
+                angle_delta < stable_angle_threshold;
+
+            if (target_pose_reached && pose_is_stable) {
                 stable_counter++;
             } else {
                 stable_counter = 0;
             }
 
             if (stable_counter >= required_stable_cycles) {
-                break;
+                RCLCPP_INFO(
+                    get_logger(),
+                    "Target reached and stabilized. Position error = %.6f m, angle error = %.3f deg",
+                    target_position_error,
+                    target_angle_error * 180.0 / M_PI
+                );
+                return true;
             }
 
-            last_pose = current_pose_;
+            previous_pose = current_pose_;
             rate.sleep();
         }
 
-        // 額外再靜止 1 秒（你一開始就要求的）
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-
-        RCLCPP_INFO(get_logger(), "Pose stabilized.");
+        return false;
     }
+
+    // 舊版穩定判斷，不再使用。請改用 waitForTargetPoseReachedAndStable()
+    // void waitForPoseStabilized()
+    // {
+    //     RCLCPP_INFO(get_logger(), "Waiting for robot pose to stabilize...");
+
+    //     rclcpp::Rate rate(100.0);
+
+    //     geometry_msgs::msg::PoseStamped last_pose = current_pose_;
+    //     int stable_counter = 0;
+
+    //     constexpr double position_threshold = 1e-4;  // 0.1 mm
+    //     constexpr double angle_threshold = 0.1 * M_PI / 180.0;  // 0.1 degree
+    //     constexpr int required_stable_cycles = 100;  
+
+    //     while (rclcpp::ok())
+    //     {
+    //         rclcpp::spin_some(shared_from_this());
+
+    //         double dx = current_pose_.pose.position.x - last_pose.pose.position.x;
+    //         double dy = current_pose_.pose.position.y - last_pose.pose.position.y;
+    //         double dz = current_pose_.pose.position.z - last_pose.pose.position.z;
+
+    //         double position_delta = std::sqrt(dx*dx + dy*dy + dz*dz);
+    //         tf2::Quaternion q_now, q_last;
+    //         tf2::fromMsg(current_pose_.pose.orientation, q_now);
+    //         tf2::fromMsg(last_pose.pose.orientation, q_last);
+
+    //         double angle_delta = q_now.angleShortestPath(q_last);
+
+    //         if (position_delta < position_threshold && angle_delta < angle_threshold) {
+    //             stable_counter++;
+    //         } else {
+    //             stable_counter = 0;
+    //         }
+
+    //         if (stable_counter >= required_stable_cycles) {
+    //             break;
+    //         }
+
+    //         last_pose = current_pose_;
+    //         rate.sleep();
+    //     }
+
+    //     // 額外再靜止 1 秒（你一開始就要求的）
+    //     std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    //     RCLCPP_INFO(get_logger(), "Pose stabilized.");
+    // }
 
 
     void estimateInitialBias(double &fx0, double &fy0, double &fz0,
@@ -851,22 +934,59 @@ private:
                     fx0, fy0, fz0, mx0, my0, mz0);
     }
 
+    // bool sendRobotMove(const std::vector<double>& pose) {
+    //     if (!move_client_->wait_for_service(std::chrono::seconds(5))) {
+    //         RCLCPP_ERROR(get_logger(), "set_positions service not available");
+    //         return false;
+    //     }
+
+    //     auto request = std::make_shared<tm_msgs::srv::SetPositions::Request>();
+    //     request->positions = pose;
+    //     request->velocity = 1.0; 
+    //     request->acc_time = 100;
+    //     request->fine_goal = true;
+
+    //     auto result = move_client_->async_send_request(request);
+        
+    //     // 等待服務回應 (Timeout 設為 20 秒)
+    //     if (rclcpp::spin_until_future_complete(this->get_node_base_interface(), result, std::chrono::seconds(20)) ==
+    //         rclcpp::FutureReturnCode::SUCCESS) {
+    //         return result.get()->ok;
+    //     }
+    //     return false;
+    // }
+
     bool sendRobotMove(const std::vector<double>& pose) {
-        if (!move_client_->wait_for_service(std::chrono::seconds(5))) {
-            RCLCPP_ERROR(get_logger(), "set_positions service not available");
+        if (!script_client_->wait_for_service(std::chrono::seconds(5))) {
+            RCLCPP_ERROR(get_logger(), "send_script service not available");
             return false;
         }
 
-        auto request = std::make_shared<tm_msgs::srv::SetPositions::Request>();
-        request->motion_type = tm_msgs::srv::SetPositions::Request::PTP_T;
-        request->positions = pose;
-        request->velocity = 0.3; // 速度不宜過快
-        request->acc_time = 0.5;
-        request->fine_goal = true;
+        auto request = std::make_shared<tm_msgs::srv::SendScript::Request>();
+        request->id = "1";
 
-        auto result = move_client_->async_send_request(request);
+        // 將數值轉換為 TM Script 格式: PTP("CPP", x, y, z, rx, ry, rz, speed, acc, blend, precision)
+        // 注意：這裡的 pose[3~5] 是弧度，TM Script 通常預期角度(degree)，
+        // 但若使用 "CPP" 模式且 Driver 有正確處理，則視您的機器人設定而定。
+        // 以下示範轉換為度數 (角度 = 弧度 * 180 / PI)
+        auto to_deg = [](double rad) { return rad * 180.0 / M_PI; };
+
+        char script_buf[256];
+        snprintf(script_buf, sizeof(script_buf),
+                "PTP(\"CPP\",%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%d,%d,%d,%s)",
+                pose[0] * 1000.0, pose[1] * 1000.0, pose[2] * 1000.0, // 假設 pose 單位是 m，轉成 mm
+                to_deg(pose[3]), to_deg(pose[4]), to_deg(pose[5]),    // 轉成角度
+                200,     // velocity 
+                200,    // acc (ms)
+                0,      // blend 
+                "true"  // fine_goal
+        );
+
+        request->script = std::string(script_buf);
+        RCLCPP_INFO(get_logger(), "Sending script: %s", request->script.c_str());
+
+        auto result = script_client_->async_send_request(request);
         
-        // 等待服務回應 (Timeout 設為 20 秒)
         if (rclcpp::spin_until_future_complete(this->get_node_base_interface(), result, std::chrono::seconds(20)) ==
             rclcpp::FutureReturnCode::SUCCESS) {
             return result.get()->ok;
@@ -874,21 +994,21 @@ private:
         return false;
     }
 
-    // 成員變數
-    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_;
-    rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr wrench_sub_;
-    rclcpp::Publisher<geometry_msgs::msg::WrenchStamped>::SharedPtr   wrench_pub_;
     
-    rclcpp::Client<tm_msgs::srv::SetPositions>::SharedPtr move_client_;   
+    
+    // rclcpp::Client<tm_msgs::srv::SetPositions>::SharedPtr move_client_;   
+    rclcpp::Client<tm_msgs::srv::SendScript>::SharedPtr script_client_;
 
+    double fx_, fy_, fz_, mx_, my_, mz_;
     geometry_msgs::msg::PoseStamped current_pose_;
     bool have_pose_   {false};
     bool have_wrench_ {false};
 
-    double fx_{0.0}, fy_{0.0}, fz_{0.0};
-    double mx_{0.0}, my_{0.0}, mz_{0.0};
+    // double fx_{0.0}, fy_{0.0}, fz_{0.0};
+    // double mx_{0.0}, my_{0.0}, mz_{0.0};
 
     const std::vector<std::vector<double>> calibration_poses = {
+        {-0.23559, -0.32411, 0.32332,  3.14159,  0.00000,  1.57079}, // 180, 0, 90
         {-0.23559, -0.32411, 0.32332,  3.14159,  0.00000,  3.14159}, // 180, 0, 180
         {-0.23559, -0.32411, 0.32332, -2.37714,  0.00000,  3.14159}, // -136.2, 0, 180
         {-0.23559, -0.32411, 0.32332,  2.37191,  0.00000,  3.14159}, // 135.9, 0, 180
@@ -909,8 +1029,13 @@ private:
     std::string wrench_topic_;
     std::string output_topic_;
 
-    std::vector<ButterworthFilter> filters_;
-    // std::vector<LeadFilter> filters_;
+    // 成員變數
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr wrench_sub_;
+    rclcpp::Publisher<geometry_msgs::msg::WrenchStamped>::SharedPtr   wrench_pub_;
+
+    std::vector<ButterworthFilter> bw_filters_;
+    std::vector<LeadFilter> lead_filters_;
 };
 
 int main(int argc, char **argv)
