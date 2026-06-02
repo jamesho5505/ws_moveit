@@ -60,9 +60,13 @@ except ImportError:
 # ── 視覺定位常數 ──────────────────────────────────────────
 # =========================================================
 
+# DEFAULT_MODEL_PATH = (
+#     '/home/jamesho5055/ws_moveit/src/tm5-900_moveit_config/'
+#     'scripts/pickup_visual/yolosbest.pt'
+# )
 DEFAULT_MODEL_PATH = (
     '/home/jamesho5055/ws_moveit/src/tm5-900_moveit_config/'
-    'scripts/pickup_visual/yolosbest.pt'
+    'scripts/pickup_visual/final_obb.pt'
 )
 
 VIEW_POSE_CPP = {
@@ -70,20 +74,23 @@ VIEW_POSE_CPP = {
     'rx': 180.0, 'ry': 0.0,   'rz': 90.0,
 }
 VIEW_MOVE_SPEED           = 500
-VIEW_MOVE_ACCELERATION_MS = 200
+VIEW_MOVE_ACCELERATION_MS = 10
 
 CAMERA_WIDTH              = 640
 CAMERA_HEIGHT             = 480
 CAMERA_FPS                = 30
-NEEDED_VISION_SAMPLES     = 8
+NEEDED_VISION_SAMPLES     = 10
 MAX_VISION_FRAMES         = 300
 DEPTH_PATCH_RADIUS_PIXELS = 4
-VISION_SAMPLE_INTERVAL_S  = 0.05
+VISION_SAMPLE_INTERVAL_S  = 0.1
 SHOW_VISION_WINDOW        = True
 VISION_WINDOW_NAME        = 'YOLO OBB Detection'
-PEELING_X_OFFSET = 13.0
+TCP_X_OFFSET_MM = 6.50
+TCP_Y_OFFSET_MM = -10.50
+PEELING_X_OFFSET = -10.0
 PEELING_RX_OFFSET = -160.0
-PEELING_Z_OFFSET =  91.0 #94.0 
+PEELING_RY_OFFSET = 0.0
+PEELING_Z_OFFSET =  89.0 #94.0 
 
 CALIBRATION_Z_OFFSET_MM   = 0.0
 # PCA_ROI_RADIUS_PIXELS      = 10
@@ -112,16 +119,23 @@ class FuzzyKfController:
     """
 
     KF_MIN      = 0.005
-    KF_MAX      = 0.03 #0.025
+    KF_MAX      = 0.020 #0.025
     KF_STEP     = 0.00005
     KF_UNIVERSE = np.arange(KF_MIN, KF_MAX + KF_STEP, KF_STEP)
 
+    # RULE_TABLE = [
+    #     ['S', 'S', 'S', 'M', 'B'],
+    #     ['S', 'S', 'S', 'S', 'S'],
+    #     ['M', 'M', 'M', 'S', 'S'],
+    #     ['B', 'B', 'M', 'M', 'S'],
+    #     ['B', 'B', 'B', 'B', 'M'],
+    # ]
     RULE_TABLE = [
-        ['S', 'S', 'S', 'M', 'B'],
-        ['S', 'S', 'S', 'S', 'S'],
-        ['M', 'M', 'M', 'S', 'S'],
-        ['B', 'B', 'M', 'M', 'S'],
-        ['B', 'B', 'B', 'B', 'M'],
+        ['B', 'M', 'M', 'S', 'S'],
+        ['M', 'M', 'S', 'S', 'S'],
+        ['M', 'S', 'S', 'S', 'M'],
+        ['S', 'S', 'S', 'M', 'M'],
+        ['S', 'S', 'M', 'M', 'B'],
     ]
     INPUT_LABELS = ['NB', 'NS', 'ZE', 'PS', 'PB']
 
@@ -162,22 +176,52 @@ class FuzzyKfController:
             'PB': self._trap(value,   3.0,   8.0, 30.0, 30.0),
         }
 
-    def _precompute_output_mf(self):
-        universe = self.KF_UNIVERSE
-        return {
-            # 1.5 mm/s FOLLOW_SURFACE 時，原本 B≈0.017 會讓法向修正太積極。
-            # 先降低輸出增益，不改 rule table，保留模糊控制邏輯。
-            'S' : np.array([self._tri (x, 0.0055, 0.0065, 0.0080) for x in universe]),
-            'M' : np.array([self._tri (x, 0.0075, 0.0090, 0.0110) for x in universe]),
-            'B' : np.array([self._tri (x, 0.0100, 0.0120, 0.0140) for x in universe]),
-        }
+    # def _fuzzify_force_error_input(self, value):
+    #     # 調整重疊度，讓相鄰三角形完美交疊
+    #     return {
+    #         'NB': self._trap(value, -5.0, -5.0, -3.0, -0.8),
+    #         'NS': self._tri (value, -3.0, -0.8,  0.0),
+    #         'ZE': self._tri (value, -0.8,  0.0,  0.8), # 稍微拉寬穩態 ZE 的範圍，避免微小擾動太敏感
+    #         'PS': self._tri (value,  0.0,  0.8,  3.0),
+    #         'PB': self._trap(value,  0.8,  3.0,  5.0,  5.0),
+    #     }
+
+    # def _fuzzify_force_error_input(self, value):
+    #     # 調整重疊度，讓相鄰三角形完美交疊
+    #     return {
+    #         'NB': self._trap(value, -5.0, -5.0, -3.0, -0.8),
+    #         'NS': self._tri (value, -3.0, -0.8,  0.0),
+    #         'ZE': self._tri (value, -0.8,  0.0,  0.8), # 稍微拉寬穩態 ZE 的範圍，避免微小擾動太敏感
+    #         'PS': self._tri (value,  0.0,  0.8,  3.0),
+    #         'PB': self._trap(value,  0.8,  3.0,  5.0,  5.0),
+    #     }
+
+    # def _fuzzify_force_error_rate_input(self, value):
+    #     # 修正重點：將 NB 的飽和區往外推（-8 -> -20），並讓斜坡從 -2 開始就與 NS 交疊
+    #     return {
+    #         'NB': self._trap(value, -30.0, -30.0, -15.0, -5.0),
+    #         'NS': self._tri (value, -15.0,  -5.0,   0.0),
+    #         'ZE': self._tri (value,  -5.0,   0.0,   5.0), # 加強與 NS, PS 的重疊
+    #         'PS': self._tri (value,   0.0,   5.0,  15.0),
+    #         'PB': self._trap(value,   5.0,  15.0,  30.0, 30.0),
+    #     }
+
     # def _precompute_output_mf(self):
     #     universe = self.KF_UNIVERSE
     #     return {
-    #         'S' : np.array([self._tri (x, 0.006, 0.008, 0.010) for x in universe]),
-    #         'M' : np.array([self._tri (x, 0.009, 0.012, 0.015) for x in universe]),
-    #         'B' : np.array([self._tri (x, 0.014, 0.017, 0.018) for x in universe]),
+    #         # 1.5 mm/s FOLLOW_SURFACE 時，原本 B≈0.017 會讓法向修正太積極。
+    #         # 先降低輸出增益，不改 rule table，保留模糊控制邏輯。
+    #         'S' : np.array([self._tri (x, 0.0055, 0.0065, 0.0080) for x in universe]),
+    #         'M' : np.array([self._tri (x, 0.0075, 0.0090, 0.0110) for x in universe]),
+    #         'B' : np.array([self._tri (x, 0.0100, 0.0120, 0.0140) for x in universe]),
     #     }
+    def _precompute_output_mf(self):
+        universe = self.KF_UNIVERSE
+        return {
+            'S' : np.array([self._tri (x, 0.005, 0.008, 0.011) for x in universe]),
+            'M' : np.array([self._tri (x, 0.008, 0.012, 0.016) for x in universe]),
+            'B' : np.array([self._tri (x, 0.012, 0.016, 0.020) for x in universe]),
+        }
 
     def _infer_and_aggregate(self, fe_membership, fer_membership):
         aggregated = np.zeros(len(self.KF_UNIVERSE))
@@ -327,6 +371,8 @@ class HybridContourFollowingNode(Node):
         self.target_vel           = np.zeros(6)
         self.rotation_tool_to_base = np.eye(3)
         self.approach_direction_xz = np.array([1.0, 0.0], dtype=float)
+        self.done = False
+        self.failed = False
 
         # ---------------- Trajectory ----------------
         self.traj_speed     = 1.0
@@ -344,9 +390,9 @@ class HybridContourFollowingNode(Node):
         self.force      = np.zeros(3)
         self.force_base = np.zeros(3)
 
-        self.reference_force     = 3.5
+        self.reference_force     = 4.0
         self.max_force_limit     = 50.0
-        self.force_threshold_on  = 2.00
+        self.force_threshold_on  = 2.25
         self.force_threshold_off = 1.25
         self.force_xz_norm   = 0.0
         self.fz_base         = 0.0
@@ -360,8 +406,8 @@ class HybridContourFollowingNode(Node):
         self.contact_lost_required = 0.20
 
         # ---------------- Trench detection ----------------
-        self.trench_fz_threshold    = -2.75
-        self.trench_backoff_step_mm = 0.1
+        self.trench_fz_threshold    = -3.0
+        self.trench_backoff_step_mm = 0.8
         self.trench_traj_start = None
         self.trench_traj_time  = 0.0
         self.traj_end_z        = None
@@ -374,7 +420,7 @@ class HybridContourFollowingNode(Node):
 
         self.force_established    = False
         self.force_stable_time    = 0.0
-        self.force_stable_required = 0.08
+        self.force_stable_required = 0.1
 
         # ---------------- Force error filtering ----------------
         self.filtered_force_error          = 0.0
@@ -383,20 +429,20 @@ class HybridContourFollowingNode(Node):
         self.force_error_rate_limit        = 30.0
 
         # ---------------- Admittance (P + I) ----------------
-        self.Kf_base = 0.015
+        self.Kf_base = 0.012
         self.Kf      = self.Kf_base
         self.Df      = 0.000
-        self.Ki                   = 0.003   # 0.01
+        self.Ki                   = 0.0015   # 0.01
         self.force_integral       = 0.0 
-        self.force_integral_limit = 0.015  # 0.05
+        self.force_integral_limit = 0.008  # 0.05
 
         self.force_deadband     = 0.2     # 0.3
-        self.max_normal_step    = 0.1     # 0.2
+        self.max_normal_step    = 0.01     # 0.2
         self.force_correction   = np.zeros(2)
 
         self.approach_speed_mm_s = self.fast_command_approach_speed_mm_s
         self.trench_actual_speed_mm_s = 100.0
-        self.min_z_position = 89.0
+        self.min_z_position = 88.50
         self.prev_force_error = 0.0
 
         # ── 視覺定位元件 ─────────────────────────────────────
@@ -633,12 +679,30 @@ class HybridContourFollowingNode(Node):
                 f'rz={peel_pose["rz"]:.2f}°'
             )
 
+            tcp_x_base = peel_pose['tcp_x_base']
+            tcp_y_base = peel_pose['tcp_y_base']
+
+            offset_vector = (
+                TCP_X_OFFSET_MM * tcp_x_base
+                + TCP_Y_OFFSET_MM * tcp_y_base
+            )
+
+            offset_vector[2] = 0.0  # 僅在 base XY 平面偏移
+
+
+            peel_pose_with_offset = dict(peel_pose)
+            peel_pose_with_offset['x'] += float(offset_vector[0])
+            peel_pose_with_offset['y'] += float(offset_vector[1])
+            peel_pose_with_offset['z'] += float(offset_vector[2])
+
             # 移到翹取點正上方（保持視角高度）
-            above_peel = dict(peel_pose)
-            above_peel['x'] = peel_pose['x'] - PEELING_X_OFFSET
-            above_peel['y'] = peel_pose['y'] 
+            above_peel = dict(peel_pose_with_offset)
+            # above_peel['x'] = peel_pose['x'] - PEELING_X_OFFSET
+            # above_peel['y'] = peel_pose['y'] 
             above_peel['z'] = VIEW_POSE_CPP['z']
             above_peel['rx'] = PEELING_RX_OFFSET
+            above_peel['ry'] = PEELING_RY_OFFSET
+
             self.get_logger().info(
                 '[VISUAL_TEST] 移動到翹取點正上方 '
                 f'(x={above_peel["x"]:.2f}, y={above_peel["y"]:.2f}, z={above_peel["z"]:.2f})...'
@@ -648,13 +712,15 @@ class HybridContourFollowingNode(Node):
             self._send_line_blocking(
                 x=above_peel['x'], y=above_peel['y'], z=above_peel['z'],
                 rx=above_peel['rx'], ry=above_peel['ry'], rz=above_peel['rz'],
-                velocity=400, acceleration=100,
+                velocity=500, acceleration=50,
             )
             self._wait_arrival_visual(above_peel)
             self.get_logger().info('[VISUAL_TEST] ✅ 已到達翹取點正上方。')
 
-            peel_pose['x']   -= PEELING_X_OFFSET
+            # peel_pose['x']   -= PEELING_X_OFFSET
+            peel_pose = dict(peel_pose_with_offset)
             peel_pose['rx']   = PEELING_RX_OFFSET
+            peel_pose['ry']   = PEELING_RY_OFFSET
             peel_pose['z']    = PEELING_Z_OFFSET  # 視覺定位的 Z 是基於觀測位姿的相對值，這裡直接套用實驗中測得的值 # 130 無接觸
 
             if peel_pose['z'] < self.min_z_position:
@@ -667,7 +733,7 @@ class HybridContourFollowingNode(Node):
             self._send_line_blocking(
                 x=peel_pose['x'], y=peel_pose['y'], z=peel_pose['z'],
                 rx=peel_pose['rx'], ry=peel_pose['ry'], rz=peel_pose['rz'],
-                velocity=200, acceleration=200,
+                velocity=200, acceleration=100,
             )
             self._wait_arrival_visual(peel_pose)
             self.get_logger().info('[VISUAL_TEST] ✅ 已到達翹取點。')
@@ -1219,6 +1285,11 @@ class HybridContourFollowingNode(Node):
         pick_ori_deg  = None
         tcp_z_base    = None
         last_vis      = None
+        pt_list = []
+        ori_list = []
+        tcp_x_list = []
+        tcp_y_list = []
+        tcp_z_list = []
 
         self.cam_start()
         try:
@@ -1235,15 +1306,23 @@ class HybridContourFollowingNode(Node):
                 if pt is not None and ori is not None:
                     valid_count += 1
                     rx, ry, rz = ori
+                    pt_list.append(pt)
+                    ori_list.append(ori)
                     self.get_logger().info(
                         f'[VISION] sample {valid_count}/{NEEDED_VISION_SAMPLES}: '
                         f'x={pt[0]:.4f} y={pt[1]:.4f} z={pt[2]:.4f} m | '
                         f'sxyz=({rx:.2f},{ry:.2f},{rz:.2f})°'
                     )
-                    pick_pt_m    = pt
-                    pick_ori_deg = ori
-                    if det and 'z_tcp_base' in det:
-                        tcp_z_base = det['z_tcp_base']
+                    # pick_pt_m    = pt
+                    # pick_ori_deg = ori
+                    if det:
+                        if 'x_tcp_base' in det:
+                            tcp_x_list.append(det['x_tcp_base'])
+                        if 'y_tcp_base' in det:
+                            tcp_y_list.append(det['y_tcp_base'])
+                        if 'z_tcp_base' in det:
+                            tcp_z_list.append(det['z_tcp_base'])
+                            tcp_z_base = det['z_tcp_base']
                     if valid_count >= NEEDED_VISION_SAMPLES:
                         break
                     time.sleep(VISION_SAMPLE_INTERVAL_S)
@@ -1255,15 +1334,29 @@ class HybridContourFollowingNode(Node):
                     cv2.waitKey(100)
                 cv2.destroyAllWindows()
 
-        if pick_pt_m is None or pick_ori_deg is None:
+        # if pick_pt_m is None or pick_ori_deg is None:
+        if len(pt_list) < NEEDED_VISION_SAMPLES:
             raise RuntimeError('視覺定位失敗：有效樣本數不足')
 
-        rx, ry, rz = pick_ori_deg
+        # rx, ry, rz = pick_ori_deg
+        pick_pt_m = np.median(np.array(pt_list), axis=0)
+        ori_array = np.array(ori_list)
+        rx, ry, rz = np.median(ori_array, axis=0)
+        if len(tcp_x_list) > 0 and len(tcp_y_list) > 0:
+            tcp_x_base = np.mean(np.array(tcp_x_list), axis=0)
+            tcp_x_base = tcp_x_base / max(np.linalg.norm(tcp_x_base), 1e-9)
+
+            tcp_y_base = np.mean(np.array(tcp_y_list), axis=0)
+            tcp_y_base = tcp_y_base / max(np.linalg.norm(tcp_y_base), 1e-9)
+        else:
+            raise RuntimeError('視覺定位失敗：TCP 軸向量不足')
         peel_pose = {
             'x': float(pick_pt_m[0] * 1000.0),
             'y': float(pick_pt_m[1] * 1000.0),
             'z': float(pick_pt_m[2] * 1000.0),
             'rx': float(rx), 'ry': float(ry), 'rz': float(rz),
+            'tcp_x_base': tcp_x_base,
+            'tcp_y_base': tcp_y_base,
         }
 
         # 計算抬升位姿（供日後使用）
@@ -1349,6 +1442,54 @@ class HybridContourFollowingNode(Node):
         self.traj_time         = 0.0
         self.traj_start        = cur_pos.copy()
         self.force_integral    = 0.0
+
+    def _return_to_view_after_trench(self, backoff_target, line_script, leave_script):
+        self.get_logger().info('[TRENCH] Exit PVT')
+
+        self.send_script("PVTExit()")
+        time.sleep(0.2)
+
+        self.send_script("StopAndClearBuffer(0)")
+        time.sleep(0.2)
+
+        self.get_logger().info('[TRENCH] backoff')
+        self.send_script(backoff_target)
+        time.sleep(0.2)
+
+        self.get_logger().info('[TRENCH] trench traverse')
+        self.send_script(line_script)
+        time.sleep(0.2)
+
+        self.get_logger().info('[TRENCH] leave')
+        self.send_script(leave_script)
+        time.sleep(0.2)
+
+        self.get_logger().info('[TRENCH] ChangeTCP tcp_obb_208')
+        self.send_script('ChangeTCP("tcp_obb_208")')
+        time.sleep(0.2)
+
+        view_script = (
+            'PTP("CPP",'
+            f'{VIEW_POSE_CPP["x"]:.4f},'
+            f'{VIEW_POSE_CPP["y"]:.4f},'
+            f'{VIEW_POSE_CPP["z"]:.4f},'
+            f'{VIEW_POSE_CPP["rx"]:.4f},'
+            f'{VIEW_POSE_CPP["ry"]:.4f},'
+            f'{VIEW_POSE_CPP["rz"]:.4f},'
+            f'{VIEW_MOVE_SPEED},'
+            f'{VIEW_MOVE_ACCELERATION_MS},'
+            '0,true)'
+        )
+
+        self.get_logger().info('[TRENCH] send VIEW_POSE_CPP')
+        self.send_script(view_script)
+
+        # 這裡可以等 feedback 到位，但不要用 service blocking
+        self._wait_arrival_visual(VIEW_POSE_CPP)
+
+        self.get_logger().info('[TRENCH] 已回到觀察姿態')
+        self._set_phase(self.PHASE_DONE)
+        self.done = True
 
     # =========================================================
     # Control Loop（不變，visual_only 模式下不會被呼叫）
@@ -1463,23 +1604,38 @@ class HybridContourFollowingNode(Node):
             # 未接觸前快速接近：
             # 例：TMFlow 5%、真實 10 mm/s -> command 200 mm/s，
             # pvt_duration=0.01 s -> 每次 PVTPoint 前進 2 mm。
-            previous_target_pos = np.array([self.target_pose[0], self.target_pose[2]], dtype=float)
-            approach_direction_xz = np.array([self.rotation_tool_to_base[1,0], self.rotation_tool_to_base[2,0]], dtype=float)
-            approach_direction_xz /= max(np.linalg.norm(approach_direction_xz), 1e-9)
-            self.approach_direction_xz = approach_direction_xz.copy()
-            # new_reference_pos = previous_target_pos + np.array([self.fast_approach_step_mm, 0.0])
-            new_reference_pos = previous_target_pos + approach_direction_xz * self.fast_approach_step_mm
+            # previous_target_pos = np.array([self.target_pose[0], self.target_pose[2]], dtype=float)
+            # approach_direction_xz = np.array([self.rotation_tool_to_base[1,0], self.rotation_tool_to_base[2,0]], dtype=float)
+            # approach_direction_xz /= max(np.linalg.norm(approach_direction_xz), 1e-9)
+            # self.approach_direction_xz = approach_direction_xz.copy()
+            # new_reference_pos = previous_target_pos + approach_direction_xz * self.fast_approach_step_mm
+            previous_target_pos_xyz = np.array(
+                [self.target_pose[0], self.target_pose[1], self.target_pose[2]],
+                dtype=float
+            )
+
+            approach_direction_xyz = np.array([
+                self.rotation_tool_to_base[0, 1],
+                self.rotation_tool_to_base[1, 1],
+                0.0,
+            ], dtype=float)
+
+            approach_direction_xyz /= max(np.linalg.norm(approach_direction_xyz), 1e-9)
+
+            new_reference_pos_xyz = previous_target_pos_xyz + approach_direction_xyz * self.fast_approach_step_mm
 
             target_pose_temp = self.pose.copy()
-            target_pose_temp[0] = float(new_reference_pos[0])
-            target_pose_temp[2] = float(new_reference_pos[1])
+            target_pose_temp[0] = float(new_reference_pos_xyz[0])
+            target_pose_temp[1] = float(new_reference_pos_xyz[1])
+            target_pose_temp[2] = float(new_reference_pos_xyz[2])
             target_pose_temp = self.limit_command_lead(
                 target_pose_temp,
                 max_command_lead_mm=self.fast_max_command_lead_mm,
             )
             new_reference_pos = np.array([target_pose_temp[0], target_pose_temp[2]], dtype=float)
 
-            self.target_vel[0] = float(self.fast_command_approach_speed_mm_s)
+            self.target_vel[0] = float(approach_direction_xyz[0] * self.fast_command_approach_speed_mm_s)
+            self.target_vel[1] = float(approach_direction_xyz[1] * self.fast_command_approach_speed_mm_s)
             self.target_vel[2] = 0.0
             self.traj_time += self.estimated_actual_segment_time()
 
@@ -1564,31 +1720,57 @@ class HybridContourFollowingNode(Node):
 
                     leave_script = (
                         f'Line("CPP", '
-                        f'{{{target_x - 10.0 :.3f},{target_y:.3f},{target_z:.3f},'
+                        f'{{{target_x - 15.0 :.3f},{target_y:.3f},{target_z:.3f},'
                         f'{target_rx:.3f},{target_ry:.3f},{target_rz:.3f}}}, '
                         f'100, 100, 0, false)'
                     )
 
-                    self.send_script("PVTExit()")
-                    time.sleep(0.1)
-                    # self.send_script("StopAndClearBuffer()")
-                    # time.sleep(0.1)
-                    self.send_script(backoff_target)
-                    time.sleep(0.1)
-                    self.send_script(line_script)
-                    time.sleep(0.1)
-                    self.send_script(leave_script)
-                    time.sleep(0.5)
-                    # self.get_logger().info('[VISUAL_TEST] 切換 TCP → tcp_obb_208')
-                    self._send_script_blocking('ChangeTCP("tcp_obb_208")')
-                    # self.get_logger().info('[VISUAL_TEST] 移動到觀測位姿...')
-                    self._send_ptp_blocking(VIEW_POSE_CPP,
-                                            speed=VIEW_MOVE_SPEED,
-                                            acc_ms=VIEW_MOVE_ACCELERATION_MS)
-                    # self._wait_arrival_visual(VIEW_POSE_CPP)
-                    self.get_logger().info('[VISUAL_TEST] 已到達觀測位姿')
-
                     self.timer.cancel()
+
+                    threading.Thread(
+                        target=self._return_to_view_after_trench,
+                        args=(backoff_target, line_script, leave_script),
+                        daemon=True
+                    ).start()
+
+                    return
+
+                    # self.send_script("PVTExit()")
+                    # time.sleep(0.1)
+                    # # self.send_script("StopAndClearBuffer()")
+                    # # time.sleep(0.1)
+                    # self.send_script(backoff_target)
+                    # time.sleep(0.1)
+                    # self.send_script(line_script)
+                    # time.sleep(0.1)
+                    # self.send_script(leave_script)
+                    # time.sleep(0.5)
+                    # # self.get_logger().info('[VISUAL_TEST] 切換 TCP → tcp_obb_208')
+                    # self._send_script_blocking('ChangeTCP("tcp_obb_208")')
+                    # self.timer.cancel()
+                    # time.sleep(0.1)
+                    # self.get_logger().info('[VISUAL_TEST] 移動到觀測位姿...')
+                    # view_script = (
+                    #     'PTP("CPP",'
+                    #     f'{VIEW_POSE_CPP["x"]:.4f},'
+                    #     f'{VIEW_POSE_CPP["y"]:.4f},'
+                    #     f'{VIEW_POSE_CPP["z"]:.4f},'
+                    #     f'{VIEW_POSE_CPP["rx"]:.4f},'
+                    #     f'{VIEW_POSE_CPP["ry"]:.4f},'
+                    #     f'{VIEW_POSE_CPP["rz"]:.4f},'
+                    #     f'{VIEW_MOVE_SPEED},'
+                    #     f'{VIEW_MOVE_ACCELERATION_MS},'
+                    #     '0,true)'
+                    # )
+
+                    # self.get_logger().info('[TRENCH] send VIEW_POSE_CPP')
+                    # self.send_script(view_script)
+
+                    # # 這裡可以等 feedback 到位，但不要用 service blocking
+                    # self._wait_arrival_visual(VIEW_POSE_CPP)
+                    # self.get_logger().info('已到達觀測位姿')
+                    # self._set_phase(self.PHASE_DONE)
+                    
                     return
 
         elif self.phase == self.PHASE_TRENCH_TRAVERSE:
@@ -1660,13 +1842,26 @@ class HybridContourFollowingNode(Node):
         self.pub_control_data.publish(msg_ctrl)
 
         target_pose_temp = self.pose.copy()
-        target_pose_temp[0]  = float(new_reference_pos[0])
-        target_pose_temp[1]  = float(self.pose[1])
-        target_pose_temp[2]  = float(new_reference_pos[1])
-        target_pose_temp[3:] = self.pose[3:]
 
         if self.phase == self.PHASE_APPROACH:
-            target_pose_temp = self.limit_command_lead(
+            target_pose_temp[0] = float(new_reference_pos_xyz[0])
+            target_pose_temp[1] = float(new_reference_pos_xyz[1])
+            target_pose_temp[2] = float(new_reference_pos_xyz[2])
+        else:
+            target_pose_temp[0] = float(new_reference_pos[0])
+            target_pose_temp[1] = float(self.pose[1])
+            target_pose_temp[2] = float(new_reference_pos[1])
+
+        target_pose_temp[3:] = self.pose[3:]
+
+        # target_pose_temp = self.pose.copy()
+        # target_pose_temp[0]  = float(new_reference_pos[0])
+        # target_pose_temp[1]  = float(self.pose[1])
+        # target_pose_temp[2]  = float(new_reference_pos[1])
+        # target_pose_temp[3:] = self.pose[3:]
+
+        if self.phase == self.PHASE_APPROACH:
+            target_pose_temp = self.limit_command_lead_xy(
                 target_pose_temp,
                 max_command_lead_mm=self.fast_max_command_lead_mm,
             )
@@ -1682,10 +1877,13 @@ class HybridContourFollowingNode(Node):
             # APPROACH 使用固定速度命令，不用 (target - feedback) / pvt_duration。
             # 50 Hz + QueueTag gating 下 feedback 會落後，若除以 0.001 s，
             # 0.3~0.4 mm 的 command lead 會被放大成 300~400 mm/s，造成接近不穩定。
-            approach_velocity_direction_xz = self.approach_direction_xz.copy()
-            approach_velocity_direction_xz /= max(np.linalg.norm(approach_velocity_direction_xz), 1e-9)
-            self.target_vel[0] = float(approach_velocity_direction_xz[0] * self.fast_command_approach_speed_mm_s)
-            self.target_vel[2] = float(approach_velocity_direction_xz[1] * self.fast_command_approach_speed_mm_s)
+            # approach_velocity_direction_xz = self.approach_direction_xz.copy()
+            # approach_velocity_direction_xz /= max(np.linalg.norm(approach_velocity_direction_xz), 1e-9)
+            # self.target_vel[0] = float(approach_velocity_direction_xz[0] * self.fast_command_approach_speed_mm_s)
+            # self.target_vel[2] = float(approach_velocity_direction_xz[1] * self.fast_command_approach_speed_mm_s)
+            self.target_vel[0] = float(approach_direction_xyz[0] * self.fast_command_approach_speed_mm_s)
+            self.target_vel[1] = float(approach_direction_xyz[1] * self.fast_command_approach_speed_mm_s)
+            self.target_vel[2] = 0.0
         elif self.phase == self.PHASE_FORCE_REGULATION:
             self.target_vel[0] = float((self.target_pose[0] - self.pose[0]) / max(self.pvt_duration_sec, 1e-6))
             self.target_vel[2] = float((self.target_pose[2] - self.pose[2]) / max(self.pvt_duration_sec, 1e-6))
@@ -1703,7 +1901,8 @@ class HybridContourFollowingNode(Node):
         else:
             self.target_vel[0] = 0.0
             self.target_vel[2] = 0.0
-        self.target_vel[1]  = 0.0
+        if self.phase != self.PHASE_APPROACH:
+            self.target_vel[1] = 0.0
         self.target_vel[3:] = 0.0
 
         self.log_counter += 1
@@ -1773,25 +1972,6 @@ class HybridContourFollowingNode(Node):
         # 例如 logic_rate_hz=50 時，每次 PVTPoint 對應約 0.02 s，而不是舊版固定 0.2 s。
         return 1.0 / max(self.ctrl_hz, 1e-6)
 
-    # def ready_to_send_next_pvt(self):
-    #     if self.active_pvt_target_pose is None:
-    #         return True
-
-    #     target_error_mm = self.current_pvt_target_error_mm()
-    #     if target_error_mm <= self.pvt_target_settle_error_mm:
-    #         return True
-
-    #     elapsed_time = time.time() - self.last_pvt_send_time
-    #     max_wait_time = max(0.5, self.estimated_actual_segment_time() * 3.0)
-    #     if elapsed_time > max_wait_time:
-    #         self.get_logger().warn(
-    #             f'PVT target not reached in expected time. '
-    #             f'error={target_error_mm:.4f} mm, elapsed={elapsed_time:.3f}s. '
-    #             f'Allowing next command.'
-    #         )
-    #         return True
-
-    #     return False
 
     def limit_command_lead(self, target_pose, max_command_lead_mm):
         limited_pose = target_pose.copy()
@@ -1808,6 +1988,29 @@ class HybridContourFollowingNode(Node):
             )
             limited_pose[0] = float(limited_xz[0])
             limited_pose[2] = float(limited_xz[1])
+            self.last_command_lead_mm = float(max_command_lead_mm)
+        else:
+            self.last_command_lead_mm = command_lead_norm
+
+        return limited_pose
+
+    def limit_command_lead_xy(self, target_pose, max_command_lead_mm):
+        limited_pose = target_pose.copy()
+
+        actual_xy = np.array([self.pose[0], self.pose[1]], dtype=float)
+        target_xy = np.array([limited_pose[0], limited_pose[1]], dtype=float)
+
+        command_lead_vector = target_xy - actual_xy
+        command_lead_norm = float(np.linalg.norm(command_lead_vector))
+
+        if command_lead_norm > max_command_lead_mm:
+            limited_xy = (
+                actual_xy
+                + command_lead_vector / max(command_lead_norm, 1e-9)
+                * max_command_lead_mm
+            )
+            limited_pose[0] = float(limited_xy[0])
+            limited_pose[1] = float(limited_xy[1])
             self.last_command_lead_mm = float(max_command_lead_mm)
         else:
             self.last_command_lead_mm = command_lead_norm
@@ -1957,7 +2160,10 @@ def main():
     )
 
     try:
-        rclpy.spin(node)
+        # rclpy.spin(node)
+        while rclpy.ok() and not node.done:
+            rclpy.spin_once(node, timeout_sec=0.05)
+            
     except KeyboardInterrupt:
         print('KeyboardInterrupt: sending PVTExit before shutdown...')
         try:
