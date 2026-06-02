@@ -58,33 +58,46 @@ def clamp_value(value: float, lower_bound: float, upper_bound: float) -> float:
 FAST_CLOSE_FORCE_THRESHOLD_GRAMS = 100.0
 FORCE_CONTROL_FAST_GAIN = 0.003
 MAX_GRIPPER_FAST_STEP_MM = 0.085
-FORCE_TARGET_GRAMS = 750.0
-FORCE_DEADBAND_GRAMS = 20.0
-FORCE_STABLE_SECONDS = 0.1
-FORCE_CONTROL_GAIN = 0.001
-MAX_GRIPPER_STEP_MM = 0.0225
-FORCE_FILTER_ALPHA = 0.5
+FORCE_TARGET_GRAMS = 1000.0
+FORCE_DEADBAND_GRAMS = 50.0
+FORCE_STABLE_SECONDS = 0.3
+FORCE_CONTROL_GAIN = 0.00005
+MAX_GRIPPER_STEP_MM = 0.1
+FORCE_FILTER_ALPHA = 1.0
 FORCE_CONTROL_HZ = 100.0
 GRIPPER_COMMAND_HZ = 30.0
+
+# ── Slip + force-drop confirmation ─────────────────────────────
+FORCE_DROP_SLIP_THRESHOLD_GRAMS = 50.0
+FORCE_DROP_SLIP_RATIO = 0.08
+FORCE_DROP_CONFIRM_SECONDS = 0.0
+
 
 # ── 抬升參數 ──────────────────────────────────────────────────
 LIFT_STEP_MILLIMETERS = 60.0
 TOTAL_LIFT_DISTANCE_MILLIMETERS = 60.0
-LIFT_MOVE_SPEED = 80
-LIFT_MOVE_ACCELERATION_MS = 150
+LIFT_MOVE_SPEED = 50
+LIFT_MOVE_ACCELERATION_MS = 1000
 ARRIVAL_TOLERANCE_MILLIMETERS = 0.1
 
 # ── 補夾 / 防彈跳 / PVDF ───────────────────────────────────────
-TIGHTEN_DISTANCE_MILLIMETERS = 0.7
-SLIP_BOUNCE_SECONDS = 0.4
+TIGHTEN_DISTANCE_MILLIMETERS = 2.0
+SLIP_BOUNCE_SECONDS = 0.6
 # PVDF_SETTLE_THRESHOLD = 0.001
 # PVDF_SETTLE_SECONDS = 0.1
-INITIAL_LIFT_SLIP_IGNORE_SECONDS = 0.3
+INITIAL_LIFT_SLIP_IGNORE_SECONDS = 0.08
+
+SLIP_RESPONSE_MIN_WAIT_SECONDS = 0.30
+SLIP_RESPONSE_MAX_WAIT_SECONDS = 0.80
+PVDF_RESUME_THRESHOLD = 0.025
 
 # ── 夾爪參數 ──────────────────────────────────────────────────
 GRIPPER_OPEN_MILLIMETERS = 22.0
 GRIPPER_OPEN_SPEED = 255
 GRIPPER_OPEN_FORCE = 100
+GRIPPER_CLOSED_MILLIMETERS = 0.0
+GRIPPER_CLOSED_SPEED = 150
+GRIPPER_CLOSED_FORCE = 200
 GRIPPER_CONTROL_SPEED = 150
 GRIPPER_CONTROL_FORCE = 200
 
@@ -98,22 +111,22 @@ VIEW_POSE_CPP = {
     "rz": 90.0,
 }
 DROP_POSE_CPP = {
-    "x": 185.0,
-    "y": -675.0,
+    "x": -140.0,
+    "y": -700.0,
     "z": 110.0,
     "rx": 180.0,
     "ry": 0.0,
     "rz": 90.0,
 }
 VIEW_MOVE_SPEED = 250
-VIEW_MOVE_ACCELERATION_MS = 100
+VIEW_MOVE_ACCELERATION_MS = 10
 
 PRE_CONTACT_CLEARANCE_MILLIMETERS = 12.0
 MOVE_ABOVE_PICK_VELOCITY = 200
-MOVE_ABOVE_PICK_ACCELERATION = 150
-FAST_DESCEND_SPEED = 80
-FAST_DESCEND_ACCELERATION_MS = 150
-SLOW_CONTACT_DESCEND_VELOCITY = 40
+MOVE_ABOVE_PICK_ACCELERATION = 15
+FAST_DESCEND_SPEED = 120
+FAST_DESCEND_ACCELERATION_MS = 15
+SLOW_CONTACT_DESCEND_VELOCITY = 100
 SLOW_CONTACT_DESCEND_ACCELERATION = 80
 
 # ── 視覺定位參數 ─────────────────────────────────────────────
@@ -195,6 +208,7 @@ class GraspAndLiftNode(Node):
         self.camera_aligner = None
         self.camera_started = False
         self.calibration_z_offset_meters = CALIBRATION_Z_OFFSET_MILLIMETERS / 1000.0
+        self.min_z_position = 107.0
 
         # ── 夾爪 ─────────────────────────────────────────────
         self.gripper = RobotiqGripper(gripper_port)
@@ -220,6 +234,10 @@ class GraspAndLiftNode(Node):
         self.avg_power = 0.0
         self.slip_ignore_until_wall_time = 0.0
         self.pvdf_settle_since_monotonic = None
+        self.slip_response_has_been_used = False
+
+        self.lift_reference_force_grams = None
+        self.force_drop_confirm_since_monotonic = None
 
         self.current_tool_pose = [0.0] * 6
         self.current_tcp_speed = [0.0] * 6
@@ -382,7 +400,7 @@ class GraspAndLiftNode(Node):
             if current_state in (State.FORCE_CTRL, State.SLIP_RESPONSE):
                 if (
                     last_command_millimeters is None
-                    or abs(target_gripper_command_millimeters - last_command_millimeters) > 0.05
+                    or abs(target_gripper_command_millimeters - last_command_millimeters) > 0.01
                 ):
                     try:
                         self.gripper.goTomm(
@@ -456,7 +474,10 @@ class GraspAndLiftNode(Node):
 
             with self.state_lock:
                 self.slip_active = False
+                self.pvdf_settle_since_monotonic = None
                 self.slip_ignore_until_wall_time = time.time() + INITIAL_LIFT_SLIP_IGNORE_SECONDS
+                self.lift_reference_force_grams = self.filtered_force_grams
+                self.force_drop_confirm_since_monotonic = None
                 self.state = State.LIFTING
             self.get_logger().info('[SM] → LIFTING')
 
@@ -467,14 +488,14 @@ class GraspAndLiftNode(Node):
                     if self.done:
                         return
                     current_state = self.state
-                    average_power = self.avg_power
-                    pvdf_settle_since_monotonic = self.pvdf_settle_since_monotonic
-                    slip_ignore_until_wall_time = self.slip_ignore_until_wall_time
+                    # average_power = self.avg_power
+                    # pvdf_settle_since_monotonic = self.pvdf_settle_since_monotonic
+                    # slip_ignore_until_wall_time = self.slip_ignore_until_wall_time
                     current_lift_base_pose = None if self.current_lift_base_pose is None else dict(self.current_lift_base_pose)
                     detected_lift_pose = None if self.detected_lift_pose is None else dict(self.detected_lift_pose)
 
-                current_wall_time = time.time()
-                current_monotonic_time = time.monotonic()
+                # current_wall_time = time.time()
+                # current_monotonic_time = time.monotonic()
 
                 if current_state == State.LIFTING:
                     if current_lift_base_pose is None or detected_lift_pose is None:
@@ -505,7 +526,15 @@ class GraspAndLiftNode(Node):
                             f'→ ({next_lift_target_pose["x"]:.2f}, {next_lift_target_pose["y"]:.2f}, {next_lift_target_pose["z"]:.2f}) mm'
                         )
 
-                    wait_result = self._wait_arrival(next_lift_target_pose, watch_slip=True)
+                    with self.state_lock:
+                        should_watch_slip = not self.slip_response_has_been_used
+
+                    wait_result = self._wait_arrival(
+                        next_lift_target_pose,
+                        watch_slip=should_watch_slip,
+                    )
+
+                    # wait_result = self._wait_arrival(next_lift_target_pose, watch_slip=True)
 
                     if wait_result == 'done':
                         with self.state_lock:
@@ -514,6 +543,7 @@ class GraspAndLiftNode(Node):
                     elif wait_result == 'slipped':
                         self.get_logger().warn('[SM] Slip detected mid-move → SLIP_RESPONSE')
                         with self.state_lock:
+                            self.slip_response_has_been_used = True
                             self.gripper_command_millimeters = clamp_value(
                                 self.gripper_command_millimeters - TIGHTEN_DISTANCE_MILLIMETERS,
                                 self.gripper_closed_limit_millimeters,
@@ -524,6 +554,26 @@ class GraspAndLiftNode(Node):
                 elif current_state == State.SLIP_RESPONSE:
                     # 等夾爪補夾命令實際送出與動作一小段時間
                     time.sleep(0.15)
+                    slip_response_start_time = time.monotonic()
+
+                    while True:
+                        elapsed_slip_response_seconds = time.monotonic() - slip_response_start_time
+
+                        with self.state_lock:
+                            current_average_power = self.avg_power
+                            current_slip_active = self.slip_active
+
+                        minimum_wait_done = elapsed_slip_response_seconds >= SLIP_RESPONSE_MIN_WAIT_SECONDS
+                        pvdf_is_quiet = (
+                            current_average_power < PVDF_RESUME_THRESHOLD
+                            and not current_slip_active
+                        )
+                        timeout_reached = elapsed_slip_response_seconds >= SLIP_RESPONSE_MAX_WAIT_SECONDS
+
+                        if (minimum_wait_done and pvdf_is_quiet) or timeout_reached:
+                            break
+
+                        time.sleep(0.01)
 
                     # 不等 PVDF 穩定，只保留 slip 防彈跳時間
                     with self.state_lock:
@@ -542,39 +592,6 @@ class GraspAndLiftNode(Node):
                         f'(ignore slip {SLIP_BOUNCE_SECONDS:.1f}s)'
                     )
 
-                # elif current_state == State.SLIP_RESPONSE:
-                #     time.sleep(0.15)
-                #     with self.state_lock:
-                #         self.slip_ignore_until_wall_time = time.time() + SLIP_BOUNCE_SECONDS
-                #         self.slip_active = False
-                #         self.pvdf_settle_since_monotonic = None
-                #         self.state = State.PVDF_SETTLING
-                #     self.get_logger().info(
-                #         f'[SM] → PVDF_SETTLING (bounce {SLIP_BOUNCE_SECONDS:.1f}s)'
-                #     )
-
-                # elif current_state == State.PVDF_SETTLING:
-                #     if current_wall_time < slip_ignore_until_wall_time:
-                #         time.sleep(0.05)
-                #         continue
-
-                #     if average_power < PVDF_SETTLE_THRESHOLD:
-                #         if pvdf_settle_since_monotonic is None:
-                #             with self.state_lock:
-                #                 self.pvdf_settle_since_monotonic = current_monotonic_time
-                #         elif (current_monotonic_time - pvdf_settle_since_monotonic) >= PVDF_SETTLE_SECONDS:
-                #             self._send_set_event(SetEvent.Request.RESUME)
-                #             with self.state_lock:
-                #                 self.pvdf_settle_since_monotonic = None
-                #                 self.state = State.LIFTING
-                #             self.get_logger().info(
-                #                 f'[SM] PVDF stable (power={average_power:.5f}) → RESUME → LIFTING'
-                #             )
-                #     else:
-                #         with self.state_lock:
-                #             self.pvdf_settle_since_monotonic = None
-
-                #     time.sleep(0.05)
         except Exception as exc:
             self.get_logger().error(f'Control loop failed: {exc}')
             with self.state_lock:
@@ -602,6 +619,10 @@ class GraspAndLiftNode(Node):
         self.get_logger().info('[SM] INIT: moving above pick point...')
         move_above_pick_pose = dict(visual_pick_pose)
         move_above_pick_pose['z'] = VIEW_POSE_CPP['z']
+        move_above_pick_pose['rx'] = 180.0
+        move_above_pick_pose['ry'] = 15.0
+
+
         self._send_line(
             x_millimeters=move_above_pick_pose['x'],
             y_millimeters=move_above_pick_pose['y'],
@@ -610,7 +631,7 @@ class GraspAndLiftNode(Node):
             ry_degrees=move_above_pick_pose['ry'],
             rz_degrees=move_above_pick_pose['rz'],
             velocity=200,
-            acceleration=100,
+            acceleration=10,
         )
         self._wait_arrival(move_above_pick_pose, tol=0.1)
 
@@ -619,8 +640,17 @@ class GraspAndLiftNode(Node):
         # self._wait_arrival(visual_pick_pose, tol=0.1)
 
         self.get_logger().info('[SM] INIT: fast descending to pre-contact pose...')
+        if visual_pick_pose['z'] < self.min_z_position:
+            self.get_logger().warn(
+                f'Visual pick pose z={visual_pick_pose["z"]:.2f} mm is below minimum {self.min_z_position} mm, '
+                f'adjusting to minimum height for safety.'
+            )
+            visual_pick_pose['z'] = self.min_z_position
+
         pre_contact_pose = dict(visual_pick_pose)
         pre_contact_pose['z'] += PRE_CONTACT_CLEARANCE_MILLIMETERS
+        pre_contact_pose['rx'] = 180.0
+        pre_contact_pose['ry'] = 15.0
 
         self._send_ptp(
             pre_contact_pose,
@@ -630,6 +660,15 @@ class GraspAndLiftNode(Node):
         self._wait_arrival(pre_contact_pose, tol=0.1)
 
         self.get_logger().info('[SM] INIT: slow final approach to pick pose...')
+
+        visual_pick_pose['x'] += -0.5
+        visual_pick_pose['z'] += 1.0  # 加一點高度保險，避免直接撞到物體
+        # visual_pick_pose['z'] = 108.5  # 加一點高度保險，避免直接撞到物體
+        visual_pick_pose['rx'] = 180.0
+        visual_pick_pose['ry'] = 15.0
+        detected_lift_pose['rx'] = 180.0
+        detected_lift_pose['ry'] = 15.0
+
         self._send_line(
             x_millimeters=visual_pick_pose['x'],
             y_millimeters=visual_pick_pose['y'],
@@ -754,7 +793,7 @@ class GraspAndLiftNode(Node):
 
         lift_pose = {
             'x': float(lift_target_point_meters[0] * 1000.0),
-            'y': float(lift_target_point_meters[1] * 1000.0),
+            'y': float(lift_target_point_meters[1] * 1000.0) - 20.0,
             'z': float(lift_target_point_meters[2] * 1000.0),
             'rx': float(selected_pick_orientation_degrees[0]),
             'ry': float(selected_pick_orientation_degrees[1]),
@@ -1025,6 +1064,81 @@ class GraspAndLiftNode(Node):
             math.degrees(yaw_radians),
         ), rotation_matrix_homogeneous, debug_info
 
+    def compute_tcp_rpy_sxyz_from_yvec(
+        self,
+        y_axis_vector_base: np.ndarray,
+    ):
+        """
+        OBB-independent pickup pose rule:
+        - y_tcp is fixed by the vector tooth3 -> tooth2
+        - z_tcp is forced as close as possible to base -Z
+        - x_tcp = y_tcp × z_tcp
+
+        This function does not use the OBB orientation angle.
+        """
+        tcp_y_axis = self._normalize_vector(np.asarray(y_axis_vector_base, dtype=float))
+        if tcp_y_axis is None:
+            return None, None, {'reason': 'bad_y_axis'}
+
+        downward_axis_base = np.array([0.0, 0.0, -1.0], dtype=float)
+
+        # 將 base -Z 投影到垂直 y_tcp 的平面，避免 z_tcp 與 y_tcp 不垂直
+        tcp_z_axis = downward_axis_base - float(np.dot(downward_axis_base, tcp_y_axis)) * tcp_y_axis
+        tcp_z_axis = self._normalize_vector(tcp_z_axis)
+
+        if tcp_z_axis is None:
+            # 如果 y_tcp 幾乎平行 base -Z，改用 base X 當備援
+            fallback_axis_base = np.array([1.0, 0.0, 0.0], dtype=float)
+            tcp_z_axis = fallback_axis_base - float(np.dot(fallback_axis_base, tcp_y_axis)) * tcp_y_axis
+            tcp_z_axis = self._normalize_vector(tcp_z_axis)
+
+        if tcp_z_axis is None:
+            return None, None, {'reason': 'cannot_build_z_axis'}
+
+        tcp_x_axis = np.cross(tcp_y_axis, tcp_z_axis)
+        tcp_x_axis = self._normalize_vector(tcp_x_axis)
+
+        if tcp_x_axis is None:
+            return None, None, {'reason': 'cannot_build_x_axis'}
+
+        # 重新計算 z，確保三軸正交
+        tcp_z_axis = np.cross(tcp_x_axis, tcp_y_axis)
+        tcp_z_axis = self._normalize_vector(tcp_z_axis)
+
+        if tcp_z_axis is None:
+            return None, None, {'reason': 'cannot_rebuild_z_axis'}
+
+        # 確保 z_tcp 朝向 base -Z
+        if float(np.dot(tcp_z_axis, downward_axis_base)) < 0.0:
+            tcp_x_axis = -tcp_x_axis
+            tcp_z_axis = -tcp_z_axis
+
+        rotation_matrix_homogeneous = np.eye(4, dtype=float)
+        rotation_matrix_homogeneous[:3, 0] = tcp_x_axis
+        rotation_matrix_homogeneous[:3, 1] = tcp_y_axis
+        rotation_matrix_homogeneous[:3, 2] = tcp_z_axis
+
+        roll_radians, pitch_radians, yaw_radians = tf_transformations.euler_from_matrix(
+            rotation_matrix_homogeneous,
+            axes='sxyz',
+        )
+
+        debug_info = {
+            'reason': 'ok',
+            'axis_rule': 'y_tcp = tooth3_to_tooth2, z_tcp = projected_base_down',
+            'dot_y_down': float(np.dot(tcp_y_axis, downward_axis_base)),
+            'dot_z_down': float(np.dot(tcp_z_axis, downward_axis_base)),
+            'dot_xy': float(np.dot(tcp_x_axis, tcp_y_axis)),
+            'dot_xz': float(np.dot(tcp_x_axis, tcp_z_axis)),
+            'dot_yz': float(np.dot(tcp_y_axis, tcp_z_axis)),
+        }
+
+        return (
+            math.degrees(roll_radians),
+            math.degrees(pitch_radians),
+            math.degrees(yaw_radians),
+        ), rotation_matrix_homogeneous, debug_info
+
     def estimate_tangent_normal_pca(
         self,
         depth_frame,
@@ -1171,215 +1285,246 @@ class GraspAndLiftNode(Node):
         ), rotation_matrix_homogeneous
 
     def capture_one_detection(self):
-        base_from_camera_transform = self.get_base_from_camera_transform()
-        if base_from_camera_transform is None:
+        """
+        抓一幀影像，跑 YOLO OBB，回傳：
+          (pick_point_m, orientation_deg, vis_image, detection_output)
+        任何步驟失敗時回傳 None。
+        """
+        T = self.get_base_from_camera_transform()
+        if T is None:
             return None, None, None, None
 
         try:
-            frameset = self.camera_pipeline.wait_for_frames(timeout_ms=1000)
-            aligned_frameset = self.camera_aligner.process(frameset)
-            depth_frame = aligned_frameset.get_depth_frame()
-            color_frame = aligned_frameset.get_color_frame()
+            fs = self.camera_pipeline.wait_for_frames(timeout_ms=1000)
+            afs = self.camera_aligner.process(fs)
+            depth_frame = afs.get_depth_frame()
+            color_frame = afs.get_color_frame()
             if not depth_frame or not color_frame:
                 return None, None, None, None
-            color_image = np.asanyarray(color_frame.get_data())
+            color_img = np.asanyarray(color_frame.get_data())
         except Exception:
             return None, None, None, None
 
-        image_height, image_width = color_image.shape[:2]
-        image_midline_y = image_height / 2.0
-        color_intrinsics = color_frame.profile.as_video_stream_profile().intrinsics
+        h, w = color_img.shape[:2]
+        mid_y = h / 2.0
+        intr  = color_frame.profile.as_video_stream_profile().intrinsics
 
-        model_results = self.model.predict(color_image, verbose=False)
-        if len(model_results) == 0:
-            return None, None, color_image, None
+        results = self.model.predict(color_img, verbose=False)
+        if not results:
+            return None, None, color_img, None
 
-        first_result = model_results[0]
-        visualization_image = first_result.plot(labels=False, conf=False)
+        res  = results[0]
+        vis  = res.plot(labels=False, conf=False)
 
-        if (
-            getattr(first_result, 'obb', None) is None
-            or getattr(first_result.obb, 'xywhr', None) is None
-            or len(first_result.obb.xywhr) == 0
-        ):
-            return None, None, visualization_image, None
+        if (getattr(res, 'obb', None) is None
+                or getattr(res.obb, 'xywhr', None) is None
+                or len(res.obb.xywhr) == 0):
+            return None, None, vis, None
 
-        oriented_boxes = first_result.obb.xywhr.detach().cpu().numpy()
-        center_pixels = oriented_boxes[:, :2]
+        obbs = res.obb.xywhr.detach().cpu().numpy()
+        ctrs = obbs[:, :2]
 
-        if getattr(first_result.obb, 'cls', None) is not None:
-            class_indices = first_result.obb.cls.detach().cpu().numpy().astype(int)
-            tooth_class_index = None
-            for class_index, class_name in self.model.names.items():
-                if str(class_name).strip().lower() == 'tooth-s8ie':
-                    tooth_class_index = int(class_index)
+        # 過濾 tooth-s8ie 類別
+        if getattr(res.obb, 'cls', None) is not None:
+            cls_ids = res.obb.cls.detach().cpu().numpy().astype(int)
+            tooth_cls = None
+            for cid, cname in self.model.names.items():
+                if str(cname).strip().lower() == 'tooth-s8ie':
+                    tooth_cls = int(cid)
                     break
-            if tooth_class_index is not None:
-                valid_class_indices = np.where(class_indices == tooth_class_index)[0]
-                if len(valid_class_indices) == 0:
-                    return None, None, visualization_image, None
-                oriented_boxes = oriented_boxes[valid_class_indices]
-                center_pixels = center_pixels[valid_class_indices]
+            if tooth_cls is not None:
+                valid = np.where(cls_ids == tooth_cls)[0]
+                if len(valid) == 0:
+                    return None, None, vis, None
+                obbs = obbs[valid]
+                ctrs = ctrs[valid]
 
-        detection_count = len(oriented_boxes)
-        if detection_count < 2:
-            return None, None, visualization_image, None
+        n = len(obbs)
+        if n < 2:
+            return None, None, vis, None
 
-        top_half_indices = [index for index in range(detection_count) if center_pixels[index, 1] < image_midline_y]
-        bottom_half_indices = [index for index in range(detection_count) if center_pixels[index, 1] >= image_midline_y]
+        top_idx = [i for i in range(n) if ctrs[i, 1] < mid_y]
+        bot_idx = [i for i in range(n) if ctrs[i, 1] >= mid_y]
 
-        base_points_by_detection = [None] * detection_count
-        base_z_values_by_detection = [None] * detection_count
-        camera_depth_by_detection = [None] * detection_count
-        valid_depth_detection_indices = []
-
-        for detection_index in range(detection_count):
-            center_x_pixel, center_y_pixel = map(float, center_pixels[detection_index, :2])
-            depth_meters = self.median_depth(
-                depth_frame,
-                int(center_x_pixel),
-                int(center_y_pixel),
-                DEPTH_PATCH_RADIUS_PIXELS,
-            )
-            if depth_meters <= 0:
+        # 3D 反投影每個偵測
+        base_pts   = [None] * n
+        base_zs    = [None] * n
+        cam_depths = [None] * n
+        valid_ids  = []
+        for i in range(n):
+            px, py = map(float, ctrs[i, :2])
+            d = self.median_depth(depth_frame, int(px), int(py), DEPTH_PATCH_RADIUS_PIXELS)
+            if d <= 0:
                 continue
-            point_camera = self.backproject(center_x_pixel, center_y_pixel, depth_meters, color_intrinsics)
-            point_base = (base_from_camera_transform[:3, :3] @ point_camera) + base_from_camera_transform[:3, 3]
-            point_base[2] += self.calibration_z_offset_meters
-            base_points_by_detection[detection_index] = point_base
-            base_z_values_by_detection[detection_index] = float(point_base[2])
-            camera_depth_by_detection[detection_index] = float(depth_meters)
-            valid_depth_detection_indices.append(detection_index)
+            pc = self.backproject(px, py, d, intr)
+            pb = (T[:3, :3] @ pc) + T[:3, 3]
+            pb[2] += self.calibration_z_offset_meters
+            base_pts[i]   = pb
+            base_zs[i]    = float(pb[2])
+            cam_depths[i] = float(d)
+            valid_ids.append(i)
 
-        if not valid_depth_detection_indices:
-            return None, None, visualization_image, None
+        if not valid_ids:
+            return None, None, vis, None
 
-        valid_top_half_indices = [index for index in top_half_indices if index in valid_depth_detection_indices]
-        valid_bottom_half_indices = [index for index in bottom_half_indices if index in valid_depth_detection_indices]
+        # v_top = [i for i in top_idx if i in valid_ids]
+        # v_bot = [i for i in bot_idx if i in valid_ids]
+        # top_sorted = sorted(v_top, key=lambda i: float(ctrs[i, 0]))
+        # bot_sorted = sorted(v_bot, key=lambda i: float(ctrs[i, 0]))
 
-        top_sorted_indices = sorted(valid_top_half_indices, key=lambda index: float(center_pixels[index, 0]))
-        bottom_sorted_indices = sorted(valid_bottom_half_indices, key=lambda index: float(center_pixels[index, 0]))
+        # POS = 1  # 選第 2 顆（從左到右）
 
-        selected_tooth_position_left_to_right = 1
-        top_has_target = len(top_sorted_indices) > selected_tooth_position_left_to_right
-        bottom_has_target = len(bottom_sorted_indices) > selected_tooth_position_left_to_right
+        # top_ok = len(top_sorted) > POS
+        # bot_ok = len(bot_sorted) > POS
 
-        if not top_has_target and not bottom_has_target:
-            return None, None, visualization_image, None
+        # if not top_ok and not bot_ok:
+        #     return None, None, vis, None
 
-        if top_has_target and not bottom_has_target:
-            selected_region_name = 'TOP'
-            selected_region_indices = top_sorted_indices
-        elif bottom_has_target and not top_has_target:
-            selected_region_name = 'BOT'
-            selected_region_indices = bottom_sorted_indices
-        else:
-            selected_top_index = top_sorted_indices[selected_tooth_position_left_to_right]
-            selected_bottom_index = bottom_sorted_indices[selected_tooth_position_left_to_right]
-            selected_top_z = base_z_values_by_detection[selected_top_index]
-            selected_bottom_z = base_z_values_by_detection[selected_bottom_index]
-            if selected_top_z > selected_bottom_z:
-                selected_region_name = 'TOP'
-                selected_region_indices = top_sorted_indices
-            else:
-                selected_region_name = 'BOT'
-                selected_region_indices = bottom_sorted_indices
+        # if top_ok and not bot_ok:
+        #     sel_region, sel_sorted = 'TOP', top_sorted
+        # elif bot_ok and not top_ok:
+        #     sel_region, sel_sorted = 'BOT', bot_sorted
+        # else:
+        #     ti = top_sorted[POS]
+        #     bi = bot_sorted[POS]
+        #     if base_zs[ti] > base_zs[bi]:
+        #         sel_region, sel_sorted = 'TOP', top_sorted
+        #     else:
+        #         sel_region, sel_sorted = 'BOT', bot_sorted
 
-        if len(selected_region_indices) <= selected_tooth_position_left_to_right + 1:
-            return None, None, visualization_image, None
+        # if len(sel_sorted) <= POS + 1:
+        #     return None, None, vis, None
 
-        selected_detection_index = selected_region_indices[selected_tooth_position_left_to_right]          # tooth 2: pickup center
-        next_neighbor_detection_index = selected_region_indices[selected_tooth_position_left_to_right + 1] # tooth 3: y reference
+        # 只使用畫面中心線下方的牙齒作為下排
+        bottom_detection_indices = [
+            detection_index
+            for detection_index in range(n)
+            if ctrs[detection_index, 1] >= mid_y and detection_index in valid_ids
+        ]
 
-        selected_pick_point_base = base_points_by_detection[selected_detection_index]
-        next_neighbor_point_base = base_points_by_detection[next_neighbor_detection_index]
-        selected_depth_meters = camera_depth_by_detection[selected_detection_index]
-        if selected_pick_point_base is None or next_neighbor_point_base is None or selected_depth_meters is None:
-            return None, None, visualization_image, None
-
-        # Pickup point remains the center of tooth 2.
-        # New y_tcp direction is tooth 3 -> tooth 2.
-        y_axis_vector_base = selected_pick_point_base - next_neighbor_point_base
-
-        selected_center_x_pixel, selected_center_y_pixel = center_pixels[selected_detection_index]
-        next_center_x_pixel, next_center_y_pixel = center_pixels[next_neighbor_detection_index]
-        selected_pixel_x = int(round(selected_center_x_pixel))
-        selected_pixel_y = int(round(selected_center_y_pixel))
-
-        tcp_orientation_degrees, tcp_rotation_matrix, orientation_debug_info = self.compute_tcp_rpy_sxyz_from_yvec_and_tooth2_obb(
-            y_axis_vector_base=y_axis_vector_base,
-            oriented_box_tooth2=oriented_boxes[selected_detection_index],
-            depth_tooth2_meters=selected_depth_meters,
-            intrinsics=color_intrinsics,
-            base_from_camera_transform=base_from_camera_transform,
+        bottom_sorted_indices = sorted(
+            bottom_detection_indices,
+            key=lambda detection_index: float(ctrs[detection_index, 0])
         )
-        if tcp_orientation_degrees is None or tcp_rotation_matrix is None:
-            return None, None, visualization_image, None
 
-        tcp_roll_degrees, tcp_pitch_degrees, tcp_yaw_degrees = tcp_orientation_degrees
-        cv2.circle(visualization_image, (int(selected_center_x_pixel), int(selected_center_y_pixel)), 7, (0, 255, 0), -1)
-        cv2.circle(visualization_image, (int(next_center_x_pixel), int(next_center_y_pixel)), 7, (255, 0, 0), -1)
-        cv2.line(
-            visualization_image,
-            (int(next_center_x_pixel), int(next_center_y_pixel)),
-            (int(selected_center_x_pixel), int(selected_center_y_pixel)),
-            (0, 255, 255),
-            2,
+        POS = 1  # 選下排第 2 顆（從左到右）
+
+        # 需要至少有第 2 顆和第 3 顆，因為 tooth2 是翹取中心，tooth3 用來決定方向
+        if len(bottom_sorted_indices) <= POS + 1:
+            return None, None, vis, None
+
+        sel_region = 'BOT'
+        sel_sorted = bottom_sorted_indices
+
+        tooth2_idx = sel_sorted[POS]
+        tooth3_idx = sel_sorted[POS + 1]
+
+        pick_pt  = base_pts[tooth2_idx]
+        neig_pt  = base_pts[tooth3_idx]
+        dep_m    = cam_depths[tooth2_idx]
+
+        if pick_pt is None or neig_pt is None or dep_m is None:
+            return None, None, vis, None
+
+        y_vec = pick_pt - neig_pt   # tooth3 → tooth2
+        # y_vec = neig_pt - pick_pt   # tooth2 → tooth3
+
+        # tcp_ori, tcp_R4, ori_debug = self.compute_tcp_rpy_sxyz_from_yvec_and_tooth2_obb(
+        #     y_axis_vector_base=y_vec,
+        #     oriented_box_tooth2=obbs[tooth2_idx],
+        #     depth_tooth2_meters=dep_m,
+        #     intrinsics=intr,
+        #     base_from_camera_transform=T,
+        # )
+        tcp_ori, tcp_R4, ori_debug = self.compute_tcp_rpy_sxyz_from_yvec(
+            y_axis_vector_base=y_vec,
         )
-        cv2.drawMarker(visualization_image, (selected_pixel_x, selected_pixel_y), (0, 0, 255), cv2.MARKER_CROSS, 18, 2)
 
-        tcp_x_axis_base = tcp_rotation_matrix[:3, 0].copy()
-        tcp_y_axis_base = tcp_rotation_matrix[:3, 1].copy()
-        tcp_z_axis_base = tcp_rotation_matrix[:3, 2].copy()
+
+        # x_vec = pick_pt - neig_pt   # tooth3 → tooth2
+        # tcp_ori, tcp_R4, ori_debug = self.compute_tcp_rpy_sxyz_from_xvec(
+        #     x_axis_vector_base=x_vec,
+# )
+        if tcp_ori is None or tcp_R4 is None:
+            return None, None, vis, None
+
+        rx_deg, ry_deg, rz_deg = tcp_ori
+        t2cx, t2cy = ctrs[tooth2_idx]
+        t3cx, t3cy = ctrs[tooth3_idx]
+
+        cv2.circle(vis, (int(t2cx), int(t2cy)), 7, (0, 255, 0), -1)
+        cv2.circle(vis, (int(t3cx), int(t3cy)), 7, (255, 0, 0), -1)
+        cv2.line(vis, (int(t3cx), int(t3cy)), (int(t2cx), int(t2cy)), (0, 255, 255), 2)
+        cv2.drawMarker(vis, (int(round(t2cx)), int(round(t2cy))),
+                       (0, 0, 255), cv2.MARKER_CROSS, 18, 2)
+
+        tcp_x = tcp_R4[:3, 0].copy()
+        tcp_y = tcp_R4[:3, 1].copy()
+        tcp_z = tcp_R4[:3, 2].copy()
         self._draw_tcp_axes(
-            visualization_image,
-            base_from_camera_transform,
-            color_intrinsics,
-            origin_base=selected_pick_point_base,
-            x_axis_base=tcp_x_axis_base,
-            y_axis_base=tcp_y_axis_base,
-            z_axis_base=tcp_z_axis_base,
+            vis,
+            T,
+            intr,
+            origin_base=pick_pt,
+            x_axis_base=tcp_x,
+            y_axis_base=tcp_y,
+            z_axis_base=tcp_z,
         )
 
-        overlay_line_1 = f'REGION={selected_region_name} | cnt={len(selected_region_indices)} | center=tooth2 | y: tooth3->tooth2'
-        overlay_line_2 = (
-            f'P_pick(tooth2)=({selected_pick_point_base[0]:.3f},'
-            f'{selected_pick_point_base[1]:.3f},{selected_pick_point_base[2]:.3f}) m'
-        )
-        overlay_line_3 = (
-            f'Euler sxyz: rx={tcp_roll_degrees:.1f}, '
-            f'ry={tcp_pitch_degrees:.1f}, rz={tcp_yaw_degrees:.1f}'
-        )
-        overlay_line_4 = (
-            f'No PCA | x from tooth2 OBB: {orientation_debug_info.get("axis_name")} | '
-            f'z.down={orientation_debug_info.get("dot_z_down"):.3f}'
-        )
+        cv2.putText(vis, f'REGION={sel_region} | n={len(sel_sorted)} | center=tooth2',
+                    (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+        cv2.putText(vis,
+                    f'P=({pick_pt[0]:.3f},{pick_pt[1]:.3f},{pick_pt[2]:.3f}) m',
+                    (10, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+        cv2.putText(vis,
+                    f'Euler sxyz: rx={rx_deg:.1f}, ry={ry_deg:.1f}, rz={rz_deg:.1f}',
+                    (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
 
-        cv2.putText(visualization_image, overlay_line_1, (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (0, 255, 0), 2)
-        cv2.putText(visualization_image, overlay_line_2, (10, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
-        cv2.putText(visualization_image, overlay_line_3, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
-        cv2.putText(visualization_image, overlay_line_4, (10, 94), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
-
-        detection_output = {
-            'region': selected_region_name,
-            'count': len(selected_region_indices),
-            'selected_tooth2_index': selected_detection_index,
-            'next_tooth3_index': next_neighbor_detection_index,
-            'pick_point_base_meters': selected_pick_point_base,
-            'tcp_orientation_sxyz_degrees': (
-                tcp_roll_degrees,
-                tcp_pitch_degrees,
-                tcp_yaw_degrees,
-            ),
-            'orientation_rule': 'center=tooth2, y=tooth3_to_tooth2, x=tooth2_obb_perp_y, z=down',
-            'orientation_debug': orientation_debug_info,
-            'z_tcp_base': tcp_z_axis_base,
-            'x_tcp_base': tcp_x_axis_base,
-            'y_tcp_base': tcp_y_axis_base,
+        det_out = {
+            'region': sel_region,
+            'count': len(sel_sorted),
+            'pick_point_base_meters': pick_pt,
+            'tcp_orientation_sxyz_degrees': (rx_deg, ry_deg, rz_deg),
+            'z_tcp_base': tcp_z,
+            'x_tcp_base': tcp_x,
+            'y_tcp_base': tcp_y,
         }
-        return selected_pick_point_base, (tcp_roll_degrees, tcp_pitch_degrees, tcp_yaw_degrees), visualization_image, detection_output
+        return pick_pt, (rx_deg, ry_deg, rz_deg), vis, det_out
 
     # ═══ 運動工具 ═══════════════════════════════════════════════
+
+    def _is_force_drop_confirmed_during_lift(self) -> bool:
+        current_monotonic_time = time.monotonic()
+
+        with self.state_lock:
+            lift_reference_force_grams = self.lift_reference_force_grams
+            current_filtered_force_grams = self.filtered_force_grams
+            force_drop_confirm_since_monotonic = self.force_drop_confirm_since_monotonic
+
+        if lift_reference_force_grams is None:
+            return False
+
+        force_drop_threshold_grams = max(
+            FORCE_DROP_SLIP_THRESHOLD_GRAMS,
+            lift_reference_force_grams * FORCE_DROP_SLIP_RATIO,
+        )
+
+        force_drop_grams = lift_reference_force_grams - current_filtered_force_grams
+        force_drop_condition = force_drop_grams >= force_drop_threshold_grams
+
+        if force_drop_condition:
+            if force_drop_confirm_since_monotonic is None:
+                with self.state_lock:
+                    self.force_drop_confirm_since_monotonic = current_monotonic_time
+                return False
+
+            force_drop_duration_seconds = current_monotonic_time - force_drop_confirm_since_monotonic
+            return force_drop_duration_seconds >= FORCE_DROP_CONFIRM_SECONDS
+
+        with self.state_lock:
+            self.force_drop_confirm_since_monotonic = None
+
+        return False
 
     def send_script(self, script: str) -> bool:
         request = SendScript.Request()
@@ -1435,16 +1580,34 @@ class GraspAndLiftNode(Node):
                 current_x = self.current_tool_pose[0]
                 current_y = self.current_tool_pose[1]
                 current_z = self.current_tool_pose[2]
-                slip_detected = self.slip_active if watch_slip else False
+                # slip_detected = self.slip_active if watch_slip else False
+                pvdf_slip_detected = self.slip_active if watch_slip else False
+                current_filtered_force_grams = self.filtered_force_grams
+                lift_reference_force_grams = self.lift_reference_force_grams
 
-            if slip_detected:
+            # if slip_detected:
+            #     self._send_set_event(SetEvent.Request.PAUSE)
+            #     return 'slipped'
+            force_drop_confirmed = (
+                self._is_force_drop_confirmed_during_lift()
+                if watch_slip else False
+            )
+
+            confirmed_slip_with_force_drop = pvdf_slip_detected and force_drop_confirmed
+
+            if confirmed_slip_with_force_drop:
+                self.get_logger().warn(
+                    '[SLIP_CONFIRM] PVDF slip + force drop detected: '
+                    f'F_ref={lift_reference_force_grams:.1f} g, '
+                    f'F_now={current_filtered_force_grams:.1f} g'
+                )
                 self._send_set_event(SetEvent.Request.PAUSE)
                 return 'slipped'
 
             if math.sqrt((current_x - target_x) ** 2 + (current_y - target_y) ** 2 + (current_z - target_z) ** 2) < tol:
                 return 'done'
 
-            time.sleep(0.02)
+            time.sleep(0.005)
 
     def _send_set_event(self, function_code: int, arg0: int = 0, arg1: int = 0):
         request = SetEvent.Request()
@@ -1457,6 +1620,9 @@ class GraspAndLiftNode(Node):
 
     def _open_gripper_to_default(self):
         self.gripper.goTomm(GRIPPER_OPEN_MILLIMETERS, GRIPPER_OPEN_SPEED, GRIPPER_OPEN_FORCE)
+
+    def _closed_gripper_to_default(self):
+        self.gripper.goTomm(GRIPPER_CLOSED_MILLIMETERS, GRIPPER_CLOSED_SPEED, GRIPPER_CLOSED_FORCE)
 
     def _build_next_lift_target_pose(
         self,
@@ -1519,12 +1685,12 @@ class GraspAndLiftNode(Node):
             ry_degrees=drop_above_pose['ry'],
             rz_degrees=drop_above_pose['rz'],
             velocity=200,
-            acceleration=100,
+            acceleration=10,
         )
         self._wait_arrival(drop_above_pose, tol=0.1)
 
         self.get_logger().info('[DROP] Descend to drop pose...')
-        self._send_ptp(drop_pose, speed=100, acc_ms=100)
+        self._send_ptp(drop_pose, speed=120, acc_ms=50)
         self._wait_arrival(drop_pose, tol=0.1)
 
         self.get_logger().info('[DROP] Open gripper...')
@@ -1532,15 +1698,15 @@ class GraspAndLiftNode(Node):
         time.sleep(0.5)
 
         self.get_logger().info('[DROP] Lift back up...')
-        self._send_ptp(return_above_drop_pose, speed=100, acc_ms=100)
+        self._send_ptp(return_above_drop_pose, speed=200, acc_ms=50)
         self._wait_arrival(return_above_drop_pose, tol=0.1)
 
         self.get_logger().info('[RETURN] Move back to view pose...')
         self._send_ptp(VIEW_POSE_CPP, speed=VIEW_MOVE_SPEED, acc_ms=VIEW_MOVE_ACCELERATION_MS)
         self._wait_arrival(VIEW_POSE_CPP, tol=0.1)
-        
-        self.get_logger().info('[RETURN] Open gripper to default and returning to view...')
-        self._open_gripper_to_default()
+
+        self.get_logger().info('[RETURN] Close gripper to default and returning to view...')
+        self._closed_gripper_to_default()
         time.sleep(0.3)
     
     def close_log(self):
