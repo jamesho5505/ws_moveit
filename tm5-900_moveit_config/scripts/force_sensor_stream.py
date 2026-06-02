@@ -11,7 +11,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import WrenchStamped
 
 
-PORT_NAME = "/dev/ttyUSB0"
+PORT_NAME = "/dev/ttyUSB2"
 SLAVE_ADDRESS = 9
 
 BAUDRATE = 19200       # 依照 FT300-S 手冊 Modbus 設定
@@ -22,18 +22,18 @@ READ_TIMEOUT = 0.05    # 讀取 timeout (秒)
 
 
 # Butterworth filter
-order = 4      # 濾波階數，可調 2~4
-f_c = 2        # 截止頻率 Hz
-f_s = 100      # 取樣頻率 Hz
-b, a = butter(order, f_c / (f_s / 2), btype='low')
+# order = 2      # 濾波階數，可調 2~4
+# f_c = 30        # 截止頻率 Hz
+# f_s = 100      # 取樣頻率 Hz
+# b, a = butter(order, f_c / (f_s / 2), btype='low')
 
-# ================= 濾波函式 =================
-def butterworth_filter(x, z, b, a):
-    y, zf = lfilter(b, a, [x], zi=z)
-    return y[0], zf
+# # ================= 濾波函式 =================
+# def butterworth_filter(x, z, b, a):
+#     y, zf = lfilter(b, a, [x], zi=z)
+#     return y[0], zf
 
-zi_force = [lfilter_zi(b, a) * 0 for _ in range(3)]   # Fx, Fy, Fz
-zi_torque = [lfilter_zi(b, a) * 0 for _ in range(3)]  # Tx, Ty, Tz
+# zi_force = [lfilter_zi(b, a) * 0 for _ in range(3)]   # Fx, Fy, Fz
+# zi_torque = [lfilter_zi(b, a) * 0 for _ in range(3)]  # Tx, Ty, Tz
 
 
 
@@ -74,9 +74,9 @@ class Ft300StreamNode(Node):
         self.wrench_publisher = self.create_publisher(
             WrenchStamped, "/robotiq_force_torque_sensor_broadcaster/wrench", 100
         )
-        self.wrench_filtered_publisher = self.create_publisher(
-            WrenchStamped, "/robotiq_force_torque_sensor_broadcaster/wrench_filtered", 100
-        )
+        # self.wrench_filtered_publisher = self.create_publisher(
+        #     WrenchStamped, "/robotiq_force_torque_sensor_broadcaster/wrench_filtered", 100
+        # )
 
         self.get_logger().info(f"Opening serial port {self.port_name} at {BAUDRATE} baud...")
         self._open_serial_port()
@@ -219,15 +219,15 @@ class Ft300StreamNode(Node):
                     my = my_raw / 1000.0
                     mz = mz_raw / 1000.0
 
-                    fx_f, zi_force[0] = butterworth_filter(fx, zi_force[0], b, a)
-                    fy_f, zi_force[1] = butterworth_filter(fy, zi_force[1], b, a)
-                    fz_f, zi_force[2] = butterworth_filter(fz, zi_force[2], b, a)
-                    tx_f, zi_torque[0] = butterworth_filter(mx, zi_torque[0], b, a)
-                    ty_f, zi_torque[1] = butterworth_filter(my, zi_torque[1], b, a)
-                    tz_f, zi_torque[2] = butterworth_filter(mz, zi_torque[2], b, a)
+                    # fx_f, zi_force[0] = butterworth_filter(fx, zi_force[0], b, a)
+                    # fy_f, zi_force[1] = butterworth_filter(fy, zi_force[1], b, a)
+                    # fz_f, zi_force[2] = butterworth_filter(fz, zi_force[2], b, a)
+                    # tx_f, zi_torque[0] = butterworth_filter(mx, zi_torque[0], b, a)
+                    # ty_f, zi_torque[1] = butterworth_filter(my, zi_torque[1], b, a)
+                    # tz_f, zi_torque[2] = butterworth_filter(mz, zi_torque[2], b, a)
 
                     self._publish_wrench(fx, fy, fz, mx, my, mz)
-                    self._publish_wrench_filtered(fx_f, fy_f, fz_f, tx_f, ty_f, tz_f)
+                    # self._publish_wrench_filtered(fx_f, fy_f, fz_f, tx_f, ty_f, tz_f)
 
                     # 移除已處理的 16 bytes
                     del buffer[0:16]
@@ -256,20 +256,20 @@ class Ft300StreamNode(Node):
 
         self.wrench_publisher.publish(message)
 
-    def _publish_wrench_filtered(self, fx, fy, fz, mx, my, mz):
-        message = WrenchStamped()
-        message.header.stamp = self.get_clock().now().to_msg()
-        message.header.frame_id = "robotiq_ft_frame_id"
+    # def _publish_wrench_filtered(self, fx, fy, fz, mx, my, mz):
+    #     message = WrenchStamped()
+    #     message.header.stamp = self.get_clock().now().to_msg()
+    #     message.header.frame_id = "robotiq_ft_frame_id"
 
-        message.wrench.force.x = fx
-        message.wrench.force.y = fy
-        message.wrench.force.z = fz
+    #     message.wrench.force.x = fx
+    #     message.wrench.force.y = fy
+    #     message.wrench.force.z = fz
 
-        message.wrench.torque.x = mx
-        message.wrench.torque.y = my
-        message.wrench.torque.z = mz
+    #     message.wrench.torque.x = mx
+    #     message.wrench.torque.y = my
+    #     message.wrench.torque.z = mz
 
-        self.wrench_filtered_publisher.publish(message)
+    #     self.wrench_filtered_publisher.publish(message)
 
     def destroy_node(self):
         self.should_exit = True
